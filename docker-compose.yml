@@ -20,10 +20,18 @@ services:
       STRIPE_SUCCESS_URL: ${STRIPE_SUCCESS_URL}
       STRIPE_CANCEL_URL: ${STRIPE_CANCEL_URL}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      # En prod derrière Nginx/Render/Fly : définir TRUST_PROXY=1 (IP client, cookies)
+      TRUST_PROXY: ${TRUST_PROXY:-}
     depends_on:
       postgres:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:3000/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   postgres:
     image: postgres:16-alpine

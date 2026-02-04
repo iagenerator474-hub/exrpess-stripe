@@ -89,7 +89,9 @@ Pour arrêter : `Ctrl+C` (API) ; `docker compose down` (Postgres si besoin).
 docker compose up -d
 ```
 
-L’API écoute sur le port 3000. Les variables d’environnement doivent être définies (fichier `.env` à la racine ou variables d’env exportées). Voir `README.md` pour la liste des variables.
+L’API écoute sur le port 3000. Un **healthcheck** sur `GET /ready` permet aux orchestrateurs de savoir quand l’app est prête. Les variables d’environnement doivent être définies (fichier `.env` à la racine ou variables d’env exportées). Voir `README.md` pour la liste des variables.
+
+**Production :** si l’API est derrière un reverse proxy (Nginx, Render, Fly), ajouter **`TRUST_PROXY=1`** dans le `.env` à la racine. Voir [GO_LIVE_CHECKLIST.md](GO_LIVE_CHECKLIST.md).
 
 ---
 

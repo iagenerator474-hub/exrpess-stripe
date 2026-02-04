@@ -5,7 +5,7 @@
 - [ ] `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` (prod), `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL` définis
 - [ ] `CORS_ORIGINS` = liste explicite (pas `*`)
 - [ ] `NODE_ENV=production`
-- [ ] `TRUST_PROXY=1` si app derrière Nginx/Render/Fly
+- [ ] **`TRUST_PROXY=1`** si l’API est derrière Nginx, Render, Fly ou tout reverse proxy (obligatoire pour IP client et cookies corrects). À définir dans le `.env` à la racine (docker compose) ou dans la config de la plateforme.
 - [ ] Webhook Stripe prod : URL HTTPS, événement `checkout.session.completed`, signing secret en env (distinct du local)
 - [ ] Cookies : en prod HTTPS, `COOKIE_SECURE` true (défaut) ; `COOKIE_DOMAIN` si front sous-domaine
 - [ ] Entrypoint / démarrage : `prisma migrate deploy` avant `node dist/index.js`

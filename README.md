@@ -69,7 +69,9 @@ Si Docker n’est pas disponible (erreur `dockerDesktopLinuxEngine` / « Le fich
 
 ## Env vars
 
-Voir **`api/.env.example`**. Obligatoires : `DATABASE_URL`, `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL`, `CORS_ORIGINS` (prod : liste explicite). Optionnel : `TRUST_PROXY=1`, `COOKIE_DOMAIN`, `STRIPE_API_VERSION`.
+Voir **`api/.env.example`**. Obligatoires : `DATABASE_URL`, `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL`, `CORS_ORIGINS` (prod : liste explicite). Optionnel : `COOKIE_DOMAIN`, `STRIPE_API_VERSION`.
+
+**Production derrière un reverse proxy (Nginx, Render, Fly, etc.) :** définir **`TRUST_PROXY=1`** pour que l’API utilise la bonne IP client et les cookies (X-Forwarded-*). Sans cela, l’auth par cookie et le rate-limit peuvent être incorrects. Voir [GO_LIVE_CHECKLIST.md](GO_LIVE_CHECKLIST.md).
 
 ## API & tests
 
@@ -89,4 +91,4 @@ cd api && npm run lint
 - **`demo/`** — Demo HTML servie par l’API à `/demo`.
 - **`frontend/`** — App React/Vite optionnelle (auth + checkout).
 
-`docker compose up` build l’image depuis `api/` et lance l’API + Postgres.
+`docker compose up` build l’image depuis `api/` et lance l’API + Postgres. Les secrets (JWT, Stripe, `DATABASE_URL`) ne sont **jamais** inclus dans l’image : ils sont fournis au runtime via variables d’environnement (fichier `.env` à la racine ou config plateforme).
