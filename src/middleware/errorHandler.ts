@@ -40,7 +40,6 @@ export function errorHandler(
     ...(requestId && { requestId }),
     ...(process.env.NODE_ENV === "development" && err instanceof Error && { stack: err.stack }),
   };
-  // Include path for 404 so clients can see which URL was not found
   if (statusCode === 404) {
     body.path = req.method + " " + req.originalUrl;
   }

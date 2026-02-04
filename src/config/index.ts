@@ -1,7 +1,6 @@
 import "dotenv/config";
 import { z } from "zod";
 
-/** Default Stripe API version (align with Stripe Dashboard). Override via STRIPE_API_VERSION. */
 const DEFAULT_STRIPE_API_VERSION = "2025-02-24.acacia";
 
 const envSchema = z.object({

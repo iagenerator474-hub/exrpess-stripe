@@ -10,7 +10,6 @@ router.get("/health", async (_req, res) => {
     await prisma.$queryRaw`SELECT 1`;
     dbStatus = "up";
   } catch {
-    // leave dbStatus as "down"
   }
   const ok = dbStatus === "up";
   res.status(ok ? 200 : 503).json({

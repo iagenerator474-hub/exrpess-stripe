@@ -3,10 +3,7 @@ import express from "express";
 import { config } from "../../config/index.js";
 import { handleStripeWebhook } from "./stripe.webhook.js";
 
-/**
- * Webhook Stripe: raw body (Buffer) for signature verification, body size limit.
- * Mounted before express.json() in app so this route never gets parsed JSON.
- */
+// Raw body required for Stripe signature verification (route mounted before express.json in app)
 const router = Router();
 
 router.post(

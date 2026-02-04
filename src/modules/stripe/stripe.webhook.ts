@@ -5,10 +5,7 @@ import { config } from "../../config/index.js";
 import { logger } from "../../lib/logger.js";
 import { prisma } from "../../lib/prisma.js";
 
-/**
- * Verify webhook signature. Isolated for testing (mock constructEvent).
- * @throws if signature invalid or missing
- */
+/** Verify webhook signature; throws if invalid. */
 export function verifyWebhookEvent(
   rawBody: Buffer,
   signature: string,
@@ -44,7 +41,7 @@ function processEvent(event: Stripe.Event, requestId?: string): void {
       return;
     }
 
-    // Snapshot minimal (ids, type, amount, currency, status) — do not store full event.data.object
+    // Minimal snapshot only (no full session/PII)
     const payloadSnapshot = {
       type: event.type,
       stripeEventId: event.id,
@@ -92,10 +89,7 @@ function processEvent(event: Stripe.Event, requestId?: string): void {
   }
 }
 
-/**
- * Handler: verify signature -> ACK 200 -> process event (async, after response).
- * Raw body required; mount route with express.raw().
- */
+/** Verify signature → 200 ACK → process event async (raw body required). */
 export function handleStripeWebhook(req: Request, res: Response): void {
   const rawBody = req.body as Buffer | undefined;
   const sig = req.headers["stripe-signature"] as string | undefined;
