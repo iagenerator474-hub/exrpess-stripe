@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Demo – Auth & Checkout</title>
+  <link rel="stylesheet" href="/demo/styles.css">
+</head>
+<body>
+  <div class="container">
+    <h1>Demo API</h1>
+    <p class="hint">Backend même origine : token en localStorage, refresh via cookie HttpOnly (Option B).</p>
+
+    <section>
+      <h2>Register</h2>
+      <form id="form-register">
+        <input type="email" id="register-email" placeholder="Email" required>
+        <input type="password" id="register-password" placeholder="Password (min 10)" minlength="10" required>
+        <button type="submit">S’inscrire</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Login</h2>
+      <form id="form-login">
+        <input type="email" id="login-email" placeholder="Email" required>
+        <input type="password" id="login-password" placeholder="Password" required>
+        <button type="submit">Se connecter</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Me</h2>
+      <button type="button" id="btn-me">Charger /me</button>
+    </section>
+
+    <section>
+      <h2>Create checkout session</h2>
+      <form id="form-checkout">
+        <input type="number" id="checkout-amount" placeholder="Amount (cents)" value="1000" min="1" required>
+        <input type="text" id="checkout-currency" placeholder="Currency" value="eur" list="currencies">
+        <datalist id="currencies">
+          <option value="eur">
+          <option value="usd">
+          <option value="gbp">
+        </datalist>
+        <button type="submit">Payer (Stripe Checkout)</button>
+      </form>
+    </section>
+
+    <section class="log-section">
+      <h2>Log</h2>
+      <div id="log" class="log"></div>
+    </section>
+  </div>
+  <script src="/demo/app.js"></script>
+</body>
+</html>

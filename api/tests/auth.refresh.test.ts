@@ -137,4 +137,39 @@ describe("Auth refresh & logout", () => {
     const res = await request(app).post("/auth/refresh").send();
     expect(res.status).toBe(401);
   });
+
+  it("two parallel refresh with same cookie: one 200 one 401 (double-use safe)", async () => {
+    vi.mocked(authService.login).mockResolvedValueOnce({
+      accessToken: "at-1",
+      user: { id: "user-1", email: "u@example.com", role: "user" },
+      refreshToken: "rt-1",
+      refreshTokenExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    });
+    const loginRes = await request(app)
+      .post("/auth/login")
+      .send({ email: "u@example.com", password: validPassword });
+    const cookie = getCookieFromResponse(loginRes);
+    expect(cookie).toBeDefined();
+
+    let callCount = 0;
+    vi.mocked(refreshTokenService.rotate).mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        return {
+          accessToken: "at-2",
+          user: { id: "user-1", email: "u@example.com", role: "user" },
+          newRefreshTokenValue: "rt-2",
+          newExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+        };
+      }
+      throw new AppError("Invalid or expired refresh token", 401, "UNAUTHORIZED");
+    });
+
+    const [res1, res2] = await Promise.all([
+      request(app).post("/auth/refresh").set("Cookie", cookie!).send(),
+      request(app).post("/auth/refresh").set("Cookie", cookie!).send(),
+    ]);
+    const statuses = [res1.status, res2.status].sort((a, b) => a - b);
+    expect(statuses).toEqual([200, 401]);
+  });
 });

@@ -117,8 +117,8 @@ describe("POST /stripe/webhook", () => {
       },
     });
     expect(prisma.order.updateMany).toHaveBeenCalledWith({
-      where: { id: "order-1", stripeSessionId: "cs_session_123" },
-      data: { status: "paid" },
+      where: { id: "order-1", stripeSessionId: "cs_session_123", status: { not: "paid" } },
+      data: { status: "paid", paidAt: expect.any(Date) },
     });
   });
 
@@ -168,8 +168,8 @@ describe("POST /stripe/webhook", () => {
     expect(prisma.paymentEvent.create).toHaveBeenCalledTimes(5);
     expect(prisma.order.updateMany).toHaveBeenCalledTimes(1);
     expect(prisma.order.updateMany).toHaveBeenCalledWith({
-      where: { id: "order-replay", stripeSessionId: "cs_replay" },
-      data: { status: "paid" },
+      where: { id: "order-replay", stripeSessionId: "cs_replay", status: { not: "paid" } },
+      data: { status: "paid", paidAt: expect.any(Date) },
     });
   });
 

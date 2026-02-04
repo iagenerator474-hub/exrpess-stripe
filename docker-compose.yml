@@ -2,7 +2,9 @@
 # Variables critiques (JWT_*, STRIPE_*) sans valeur → l'app refuse de démarrer (pas de fallback vide).
 services:
   app:
-    build: .
+    build:
+      context: ./api
+      dockerfile: Dockerfile
     ports:
       - "3000:3000"
     environment:

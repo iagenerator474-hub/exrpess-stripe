@@ -49,14 +49,22 @@ export async function createCheckoutSession(
       stripeSessionId: session.sessionId,
       orderId: order.id,
     };
-  } catch {
+  } catch (err) {
     await prisma.order.update({
       where: { id: order.id },
       data: { status: "failed" },
     });
+    const stripeMessage = err instanceof Error ? err.message : String(err);
     logger.warn("Checkout session failed, order marked failed", {
       orderId: order.id,
+      stripeError: stripeMessage,
     });
-    throw new AppError("Payment setup failed", 502, "STRIPE_ERROR");
+    throw new AppError(
+      process.env.NODE_ENV === "development"
+        ? `Payment setup failed: ${stripeMessage}`
+        : "Payment setup failed",
+      502,
+      "STRIPE_ERROR"
+    );
   }
 }

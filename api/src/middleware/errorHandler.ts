@@ -38,10 +38,8 @@ export function errorHandler(
   const body: Record<string, unknown> = {
     error: message,
     ...(requestId && { requestId }),
+    ...(statusCode === 404 && { path: req.method + " " + req.originalUrl }),
     ...(process.env.NODE_ENV === "development" && err instanceof Error && { stack: err.stack }),
   };
-  if (statusCode === 404) {
-    body.path = req.method + " " + req.originalUrl;
-  }
   res.status(statusCode).json(body);
 }

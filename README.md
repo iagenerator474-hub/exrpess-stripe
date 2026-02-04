@@ -1,68 +1,92 @@
-# Express Stripe Auth
+# Express Stripe Auth — API backend
 
-Backend Node.js/Express (TypeScript) : PostgreSQL (Prisma), Stripe Checkout + webhooks idempotents, auth JWT (access + refresh cookie).
+Backend API pour paiements Stripe Checkout et auth JWT (cookies refresh). PostgreSQL + Prisma, webhook signé et idempotent, rotation des refresh tokens sécurisée (anti double-usage).
+
+**Pourquoi fiable :** Webhook Stripe vérifié par signature, ACK 200 immédiat puis traitement async ; double idempotence (ledger par `stripe_event_id`, ordre passée en `paid` une seule fois par `stripe_session_id`) ; refresh token consommé en transaction (un seul usage). DB = source de vérité.
 
 ## Quickstart
 
-```bash
-npm install
-cp .env.example .env   # puis remplir les secrets
-docker compose up -d postgres
-npm run db:migrate
-npm run dev
-```
+1. **Créer le fichier d’env** (obligatoire) :
+   ```powershell
+   cd api
+   copy .env.example .env
+   ```
+   Éditer `api\.env` si besoin (par ex. `DATABASE_URL` si Postgres n’est pas sur `localhost:5432`).
 
-- **Demo** : http://localhost:3000/demo (register, login, checkout)
-- **Frontend React** : `frontend/` — `cd frontend && cp .env.example .env && npm run dev` ; définir `VITE_API_URL=http://localhost:3000`
+2. **Lancer Postgres** (Docker) :
+   ```powershell
+   docker compose up -d postgres
+   ```
+   Si l’erreur « pipe dockerDesktopLinuxEngine » apparaît : Docker n’est pas démarré ou pas installé. Utilise la procédure **Sans Docker** ci-dessous.
+
+3. **Migrations et API** (depuis la racine du repo) :
+   ```powershell
+   npm run db:migrate
+   npm run dev
+   ```
+   Ou depuis `api` : `npm run db:migrate` puis `npm run dev`.
+
+- **API** : http://localhost:3000  
+- **Demo** : http://localhost:3000/demo (HTML minimal)  
+- **Frontend React** (optionnel) : `frontend/` — `cd frontend && npm run dev`
 
 Ne jamais committer `.env`. En cas de fuite : rotation Stripe, JWT, DB.
 
-## Env vars (minimal)
+### Sans Docker (PostgreSQL local Windows)
 
-| Variable | Requis | Description |
-|----------|--------|-------------|
-| `DATABASE_URL` | Oui | URL PostgreSQL |
-| `JWT_ACCESS_SECRET` | Oui | Min 16 car. |
-| `JWT_REFRESH_SECRET` | Oui | Min 16 car. |
-| `STRIPE_SECRET_KEY` | Oui | sk_… |
-| `STRIPE_WEBHOOK_SECRET` | Oui | whsec_… |
-| `STRIPE_SUCCESS_URL` | Oui | URL après paiement |
-| `STRIPE_CANCEL_URL` | Oui | URL après annulation |
-| `CORS_ORIGINS` | Oui (prod) | Origines séparées par des virgules (pas `*`) |
-| `TRUST_PROXY` | Si proxy | `1` derrière Nginx/Render/Fly |
+Si Docker n’est pas disponible (erreur `dockerDesktopLinuxEngine` / « Le fichier spécifié est introuvable ») :
 
-Voir `.env.example` pour les options (COOKIE_DOMAIN, STRIPE_API_VERSION, etc.).
+1. **Installer PostgreSQL** : https://www.postgresql.org/download/windows/
+2. **Créer la base** : ouvrir pgAdmin ou `psql`, puis exécuter :
+   ```sql
+   CREATE DATABASE app_db;
+   ```
+3. **Configurer `api\.env`** : adapter `DATABASE_URL` (utilisateur, mot de passe, port par défaut 5432) :
+   ```env
+   DATABASE_URL=postgresql://postgres:VOTRE_MOT_DE_PASSE@localhost:5432/app_db
+   ```
+4. **Lancer** (sans `docker compose`) :
+   ```powershell
+   npm run db:migrate
+   npm run dev
+   ```
 
-## Stripe
+## Stripe (Checkout → webhook → order paid)
 
-- **Local** : `stripe listen --forward-to http://localhost:3000/stripe/webhook` ; copier le `whsec_…` dans `.env` → `STRIPE_WEBHOOK_SECRET`. Secret local ≠ prod.
-- **Prod** : Dashboard → Webhooks → Add endpoint (URL HTTPS) → événement `checkout.session.completed` → récupérer le signing secret en env.
+1. Client appelle `POST /payments/checkout-session` (auth) → API crée une Order (pending) et une session Stripe, stocke `session.id` dans Order, renvoie l’URL Checkout.
+2. Utilisateur paie sur Stripe ; Stripe envoie `checkout.session.completed` au webhook.
+3. Webhook : signature vérifiée → 200 ACK → en async : insertion PaymentEvent (unique `stripe_event_id`), puis `UPDATE order SET status='paid', paidAt=now() WHERE stripeSessionId=? AND status!='paid'`. Rejeu du même event ou même session = noop.
 
-Webhook : signature vérifiée, ACK 200 puis traitement ; idempotence via `PaymentEvent.stripe_event_id` unique.
+**Local** : `stripe listen --forward-to http://localhost:3000/stripe/webhook` ; mettre le `whsec_…` dans `.env` (secret local ≠ prod).  
+**Prod** : Dashboard → Webhooks → URL HTTPS, événement `checkout.session.completed`, signing secret en env.
 
-## DB
+## Security notes
 
-- **Dev** : `npm run db:migrate` (ou `npx prisma migrate dev`)
-- **Prod** : l’entrypoint Docker exécute `prisma migrate deploy` au démarrage
-- **Seed** : `npm run db:seed` (utilisateur demo : voir `prisma/seed.ts`)
+- **Webhook** : body brut pour la signature ; pas de log du payload complet.
+- **Idempotence** : ledger Stripe (PaymentEvent) + mise à jour Order conditionnelle (`status != 'paid'`).
+- **Refresh token** : un seul usage ; consommation en transaction (`replacedByTokenId` / `revokedAt`). Double appel = un 200, un 401.
+- **Cookies** : httpOnly, SameSite=Lax, Secure en prod. `maxAge` en millisecondes.
 
-## Commands
+## Env vars
 
-| Script | Description |
-|--------|-------------|
-| `npm run dev` | Dev (watch) |
-| `npm run build` | Build |
-| `npm start` | Prod |
-| `npm test` | Tests |
-| `npm run lint` | ESLint |
-| `npm run db:migrate` | Migrations dev |
-| `npm run db:seed` | Seed DB |
+Voir **`api/.env.example`**. Obligatoires : `DATABASE_URL`, `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL`, `CORS_ORIGINS` (prod : liste explicite). Optionnel : `TRUST_PROXY=1`, `COOKIE_DOMAIN`, `STRIPE_API_VERSION`.
 
-## Links
+## API & tests
 
-- **[SMOKE_TEST.md](SMOKE_TEST.md)** — Tests manuels reproductibles (health, auth, checkout, webhook)
-- **[GO_LIVE_CHECKLIST.md](GO_LIVE_CHECKLIST.md)** — Checklist avant mise en prod
+- **Endpoints** : `openapi.yaml` dans `api/`.
+- **Procédure de lancement** : [PROCEDURE_LANCEMENT.md](PROCEDURE_LANCEMENT.md).
+- **Smoke test** : [SMOKE_TEST.md](SMOKE_TEST.md).
+- **Go-live** : [GO_LIVE_CHECKLIST.md](GO_LIVE_CHECKLIST.md).
 
-## Deploy
+```bash
+cd api && npm test    # tests Vitest (webhook idempotent, refresh, auth guard)
+cd api && npm run lint
+```
 
-Docker : `docker compose up --build`. En prod, définir toutes les variables (tableau ci-dessus), `NODE_ENV=production`, healthcheck sur `GET /ready`. Rollback : redéployer le tag/image précédent ; attention aux migrations irréversibles.
+## Structure
+
+- **`api/`** — Backend (Express, Prisma, Stripe, auth). Toutes les commandes backend : `cd api && npm run …`.
+- **`demo/`** — Demo HTML servie par l’API à `/demo`.
+- **`frontend/`** — App React/Vite optionnelle (auth + checkout).
+
+`docker compose up` build l’image depuis `api/` et lance l’API + Postgres.

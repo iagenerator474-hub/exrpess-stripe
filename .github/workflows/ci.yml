@@ -13,6 +13,6 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-      - run: npm ci
-      - run: npm run lint
-      - run: npm test
+      - run: cd api && npm ci
+      - run: cd api && npm run lint
+      - run: cd api && npm test
