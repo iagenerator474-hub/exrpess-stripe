@@ -1,0 +1,62 @@
+import { prisma } from "../../lib/prisma.js";
+import { logger } from "../../lib/logger.js";
+import * as stripeService from "../stripe/stripe.service.js";
+import { AppError } from "../../middleware/errorHandler.js";
+
+export interface CreateCheckoutSessionInput {
+  userId: string;
+  amountCents: number;
+  currency: string;
+}
+
+export interface CreateCheckoutSessionResult {
+  checkoutUrl: string;
+  stripeSessionId: string;
+  orderId: string;
+}
+
+export async function createCheckoutSession(
+  input: CreateCheckoutSessionInput
+): Promise<CreateCheckoutSessionResult> {
+  const order = await prisma.order.create({
+    data: {
+      userId: input.userId,
+      amountCents: input.amountCents,
+      currency: input.currency,
+      status: "pending",
+    },
+  });
+
+  try {
+    const session = await stripeService.createCheckoutSession({
+      orderId: order.id,
+      amountCents: input.amountCents,
+      currency: input.currency,
+    });
+
+    await prisma.order.update({
+      where: { id: order.id },
+      data: { stripeSessionId: session.sessionId },
+    });
+
+    logger.info("Checkout session created", {
+      orderId: order.id,
+      stripeSessionId: session.sessionId,
+    });
+
+    return {
+      checkoutUrl: session.url,
+      stripeSessionId: session.sessionId,
+      orderId: order.id,
+    };
+  } catch {
+    await prisma.order.update({
+      where: { id: order.id },
+      data: { status: "failed" },
+    });
+    logger.warn("Checkout session failed, order marked failed", {
+      orderId: order.id,
+    });
+    throw new AppError("Payment setup failed", 502, "STRIPE_ERROR");
+  }
+}

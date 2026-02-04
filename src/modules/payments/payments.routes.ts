@@ -1,0 +1,40 @@
+import { Router, Request, Response, NextFunction } from "express";
+import { authGuard } from "../../middleware/authGuard.js";
+import { checkoutSessionBodySchema } from "./checkout.validation.js";
+import * as checkoutService from "./checkout.service.js";
+import { AppError } from "../../middleware/errorHandler.js";
+
+const router = Router();
+
+router.post(
+  "/checkout-session",
+  authGuard,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const userId = req.user?.userId ?? req.user?.sub;
+      if (!userId) {
+        next(new AppError("Unauthorized", 401, "UNAUTHORIZED"));
+        return;
+      }
+
+      const parsed = checkoutSessionBodySchema.safeParse(req.body);
+      if (!parsed.success) {
+        const msg = parsed.error.errors.map((e) => e.message).join("; ") || "Validation failed";
+        throw new AppError(msg, 400, "VALIDATION_ERROR");
+      }
+
+      const { amount, currency } = parsed.data;
+      const result = await checkoutService.createCheckoutSession({
+        userId,
+        amountCents: amount,
+        currency,
+      });
+
+      res.status(200).json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+export const paymentsRoutes = router;

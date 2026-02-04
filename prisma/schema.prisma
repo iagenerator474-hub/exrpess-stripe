@@ -1,0 +1,62 @@
+// Prisma schema – PostgreSQL
+// Run: npx prisma generate / npx prisma migrate dev
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  role         String    @default("user") // e.g. "user" | "admin"
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  refreshTokens RefreshToken[]
+  orders        Order[]
+}
+
+model RefreshToken {
+  id                String    @id @default(cuid())
+  tokenHash         String    @unique @map("token_hash")
+  userId            String    @map("user_id")
+  expiresAt         DateTime  @map("expires_at")
+  revokedAt         DateTime? @map("revoked_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  replacedByTokenId String?   @unique @map("replaced_by_token_id")
+
+  user         User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  replacement  RefreshToken?  @relation("Rotation", fields: [replacedByTokenId], references: [id])
+  replacedToken RefreshToken? @relation("Rotation")
+}
+
+model Order {
+  id            String   @id @default(cuid())
+  userId        String   @map("user_id")
+  stripeSessionId String? @unique @map("stripe_session_id")
+  amountCents   Int      @map("amount_cents")
+  currency      String   @default("eur")
+  status        String   @default("pending") // pending | paid | failed | refunded
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  paymentEvents PaymentEvent[]
+}
+
+model PaymentEvent {
+  id            String   @id @default(cuid())
+  orderId       String   @map("order_id")
+  stripeEventId String   @unique @map("stripe_event_id") // idempotency key
+  type          String   // e.g. checkout.session.completed, payment_intent.succeeded
+  payload       Json?    // raw or relevant payload snapshot
+  processedAt   DateTime @default(now()) @map("processed_at")
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}

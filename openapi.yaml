@@ -1,0 +1,122 @@
+openapi: 3.0.3
+info:
+  title: Express Stripe Auth API
+  version: 0.1.0
+  description: Squelette API – health, auth, Stripe webhook
+
+servers:
+  - url: http://localhost:3000
+    description: Local
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      operationId: getHealth
+      tags: [Health]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  env: { type: string }
+                  db: { type: string, enum: [up, down] }
+
+  /ready:
+    get:
+      summary: Readiness (DB)
+      operationId: getReady
+      tags: [Health]
+      responses:
+        "200":
+          description: Ready (DB up)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ready }
+        "503":
+          description: Not ready (DB down)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: "not ready" }
+
+  /auth/register:
+    post:
+      summary: Register (not implemented)
+      operationId: register
+      tags: [Auth]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+      responses:
+        "501":
+          description: Not implemented
+
+  /auth/login:
+    post:
+      summary: Login (not implemented)
+      operationId: login
+      tags: [Auth]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        "501":
+          description: Not implemented
+
+  /auth/refresh:
+    post:
+      summary: Refresh token (not implemented)
+      operationId: refresh
+      tags: [Auth]
+      responses:
+        "501":
+          description: Not implemented
+
+  /auth/logout:
+    post:
+      summary: Logout (not implemented)
+      operationId: logout
+      tags: [Auth]
+      responses:
+        "501":
+          description: Not implemented
+
+  /stripe/webhook:
+    post:
+      summary: Stripe webhook (raw body, signature verification placeholder)
+      operationId: stripeWebhook
+      tags: [Stripe]
+      parameters:
+        - name: stripe-signature
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200":
+          description: Received
+        "400":
+          description: Bad request (e.g. missing body/signature)
