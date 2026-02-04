@@ -6,6 +6,11 @@
  */
 
 const LOG_ID = 'log';
+// Same origin as the page (e.g. http://localhost:3000 when served from /demo)
+var API_BASE = typeof window !== 'undefined' && window.location ? window.location.origin : '';
+if (API_BASE && !/^https?:/.test(API_BASE)) {
+  API_BASE = ''; // file:// or other; will show error when calling API
+}
 
 function getAccessToken() {
   return localStorage.getItem('accessToken') || '';
@@ -34,10 +39,10 @@ async function fetchWithAuth(url, options = {}, retried = false) {
   const headers = { ...options.headers, 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
-  const res = await fetch(url, { ...options, headers, credentials: 'include' });
+  const res = await fetch(API_BASE + url, { ...options, headers, credentials: 'include' });
 
   if (res.status === 401 && !retried) {
-    const refreshRes = await fetch('/auth/refresh', { method: 'POST', credentials: 'include' });
+    const refreshRes = await fetch(API_BASE + '/auth/refresh', { method: 'POST', credentials: 'include' });
     if (refreshRes.ok) {
       const data = await refreshRes.json();
       if (data.accessToken) {
@@ -58,7 +63,7 @@ async function register() {
     return;
   }
   try {
-    const res = await fetch('/auth/register', {
+    const res = await fetch(API_BASE + '/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -76,14 +81,21 @@ async function register() {
 }
 
 async function login() {
-  const email = document.getElementById('login-email').value.trim();
-  const password = document.getElementById('login-password').value;
+  const emailEl = document.getElementById('login-email');
+  const passwordEl = document.getElementById('login-password');
+  if (!emailEl || !passwordEl) {
+    log('Login: champs introuvables', true);
+    return;
+  }
+  const email = emailEl.value.trim();
+  const password = passwordEl.value;
   if (!email || !password) {
     log('Login: email et password requis', true);
     return;
   }
+  log('Login en cours...');
   try {
-    const res = await fetch('/auth/login', {
+    const res = await fetch(API_BASE + '/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -116,12 +128,19 @@ async function fetchMe() {
 }
 
 async function createCheckoutSession() {
-  const amount = parseInt(document.getElementById('checkout-amount').value, 10);
-  const currency = document.getElementById('checkout-currency').value.trim().toLowerCase() || 'eur';
+  const amountEl = document.getElementById('checkout-amount');
+  const currencyEl = document.getElementById('checkout-currency');
+  if (!amountEl || !currencyEl) {
+    log('Checkout: champs introuvables', true);
+    return;
+  }
+  const amount = parseInt(amountEl.value, 10);
+  const currency = (currencyEl.value && currencyEl.value.trim().toLowerCase()) || 'eur';
   if (!amount || amount < 1) {
     log('Checkout: amount (cents) requis et > 0', true);
     return;
   }
+  log('Création session checkout...');
   try {
     const res = await fetchWithAuth('/payments/checkout-session', {
       method: 'POST',
@@ -139,16 +158,50 @@ async function createCheckoutSession() {
   }
 }
 
-document.getElementById('form-register').addEventListener('submit', (e) => {
-  e.preventDefault();
-  register();
-});
-document.getElementById('form-login').addEventListener('submit', (e) => {
-  e.preventDefault();
-  login();
-});
-document.getElementById('btn-me').addEventListener('click', fetchMe);
-document.getElementById('form-checkout').addEventListener('submit', (e) => {
-  e.preventDefault();
-  createCheckoutSession();
-});
+function init() {
+  const formRegister = document.getElementById('form-register');
+  const formLogin = document.getElementById('form-login');
+  const btnMe = document.getElementById('btn-me');
+  const formCheckout = document.getElementById('form-checkout');
+
+  if (!formLogin) {
+    console.error('Demo: form-login not found');
+    return;
+  }
+
+  if (formRegister) {
+    formRegister.addEventListener('submit', function (e) {
+      e.preventDefault();
+      register();
+    });
+  }
+  formLogin.addEventListener('submit', function (e) {
+    e.preventDefault();
+    login();
+  });
+  if (btnMe) {
+    btnMe.addEventListener('click', fetchMe);
+  }
+  if (formCheckout) {
+    formCheckout.addEventListener('submit', function (e) {
+      e.preventDefault();
+      createCheckoutSession();
+    });
+  }
+  if (!API_BASE) {
+    log('Ouvrez cette page via http://localhost:3000/demo (pas en ouvrant le fichier directement).', true);
+  } else {
+    log('Demo prête. Utilisez Login (demo@example.com / DemoPassword12) ou Payer.');
+  }
+}
+
+try {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+} catch (err) {
+  console.error('Demo init error:', err);
+  if (typeof log === 'function') log('Erreur chargement demo: ' + err.message, true);
+}

@@ -10,7 +10,7 @@ export function generateAccessToken(payload: {
   role: string;
 }): string {
   const options: jwt.SignOptions = {
-    expiresIn: config.JWT_ACCESS_EXPIRES_IN,
+    expiresIn: config.JWT_ACCESS_EXPIRES_IN as jwt.SignOptions["expiresIn"],
     issuer: config.JWT_ISSUER,
   };
   if (config.JWT_AUDIENCE) options.audience = config.JWT_AUDIENCE;
