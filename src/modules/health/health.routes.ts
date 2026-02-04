@@ -12,8 +12,9 @@ router.get("/health", async (_req, res) => {
   } catch {
     // leave dbStatus as "down"
   }
-  res.status(200).json({
-    status: "ok",
+  const ok = dbStatus === "up";
+  res.status(ok ? 200 : 503).json({
+    status: ok ? "ok" : "degraded",
     env: config.NODE_ENV,
     db: dbStatus,
   });

@@ -44,6 +44,17 @@ function processEvent(event: Stripe.Event, requestId?: string): void {
       return;
     }
 
+    // Snapshot minimal (ids, type, amount, currency, status) — do not store full event.data.object
+    const payloadSnapshot = {
+      type: event.type,
+      stripeEventId: event.id,
+      orderId,
+      stripeSessionId: sessionId,
+      amount_total: session.amount_total ?? undefined,
+      currency: session.currency ?? undefined,
+      payment_status: session.payment_status ?? undefined,
+    };
+
     // Crash-safe + idempotent: single transaction; P2002 => event already processed (NOOP)
     void prisma
       .$transaction(async (tx) => {
@@ -52,7 +63,7 @@ function processEvent(event: Stripe.Event, requestId?: string): void {
             stripeEventId: event.id,
             type: event.type,
             orderId,
-            payload: event.data?.object ? (event.data.object as object) : undefined,
+            payload: payloadSnapshot,
           },
         });
         return tx.order.updateMany({

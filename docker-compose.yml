@@ -1,19 +1,23 @@
+# Par défaut: dev-friendly. En prod, fournir NODE_ENV=production et CORS_ORIGINS explicites.
+# Variables critiques (JWT_*, STRIPE_*) sans valeur → l'app refuse de démarrer (pas de fallback vide).
 services:
   app:
     build: .
     ports:
       - "3000:3000"
     environment:
-      NODE_ENV: production
+      NODE_ENV: ${NODE_ENV:-development}
       PORT: 3000
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/app_db
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
-      JWT_ACCESS_EXPIRES_IN: 15m
-      JWT_REFRESH_EXPIRES_IN: 7d
+      JWT_ACCESS_EXPIRES_IN: ${JWT_ACCESS_EXPIRES_IN:-15m}
+      JWT_REFRESH_EXPIRES_IN: ${JWT_REFRESH_EXPIRES_IN:-7d}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
-      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
-      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+      STRIPE_SUCCESS_URL: ${STRIPE_SUCCESS_URL}
+      STRIPE_CANCEL_URL: ${STRIPE_CANCEL_URL}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
     depends_on:
       postgres:
         condition: service_healthy

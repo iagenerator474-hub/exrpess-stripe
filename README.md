@@ -18,6 +18,16 @@ npx prisma migrate dev
 npm run dev
 ```
 
+## Secrets et fichier `.env` (CRITIQUE)
+
+- **`.env.example`** : modèle versionné dans le repo, sans vraies clés (placeholders uniquement). Servir de référence pour les variables requises.
+- **`.env`** : contient les vraies valeurs (DB, JWT, Stripe). **Ne doit jamais** :
+  - être committé dans Git (il est dans `.gitignore`),
+  - être inclus dans un zip ou artefact partagé,
+  - apparaître dans le code ou la doc avec des valeurs réelles.
+- **Création** : copier `.env.example` vers `.env`, puis remplir avec vos secrets.
+- **En cas d’exposition accidentelle** (commit, fuite, zip) : rotation immédiate des clés (Stripe Dashboard, régénération JWT, mot de passe DB) et invalidation des refresh tokens si nécessaire.
+
 ## Demo (frontend minimal)
 
 Une démo statique (HTML/CSS/JS, sans framework) permet de tester register, login, /me et le flux Checkout.
@@ -50,7 +60,7 @@ Pour que Stripe renvoie vers la demo après paiement ou annulation, configurer d
 
 ## Variables d’environnement
 
-Voir `.env.example`. Principales :
+Variables minimales requises : voir `.env.example`. Principales :
 
 - `PORT` – port du serveur (défaut 3000)
 - `DATABASE_URL` – URL PostgreSQL
@@ -65,19 +75,26 @@ Voir `.env.example`. Principales :
 
 ## Docker
 
-```bash
-# Build + démarrage app + Postgres
-docker compose up --build
+**PostgreSQL seul (dev local)** :
 
-# En arrière-plan
+```bash
+docker compose up -d postgres
+# Puis : npx prisma migrate dev && npm run dev
+```
+
+**App + Postgres** (nécessite un `.env` avec tous les secrets) :
+
+```bash
+docker compose up --build
+# ou en arrière-plan
 docker compose up -d --build
 ```
 
-L’app écoute sur le port 3000, Postgres sur 5432. Les secrets (JWT, Stripe) doivent être fournis via un fichier `.env` à la racine ou des variables d’environnement.
+L’app écoute sur le port 3000. Postgres est exposé sur 5433 (hôte) pour éviter conflit avec un PostgreSQL local sur 5432. Les variables critiques (JWT, Stripe, `STRIPE_WEBHOOK_SECRET`) doivent être fournies ; sans elles, l’app refuse de démarrer avec un message clair.
 
 ## Endpoints
 
-- `GET /health` – Santé (status, env, db) ; toujours 200
+- `GET /health` – Santé (status, env, db) ; 200 si API + DB OK, 503 si DB injoignable
 - `GET /ready` – Readiness (DB) ; 200 si DB OK, 503 sinon (pour sonde K8s/orchestrateur)
 - `POST /auth/register` – Inscription
 - `POST /auth/login` – Connexion (retourne `accessToken` + `user`, envoie le refresh token en cookie HttpOnly)
@@ -96,12 +113,13 @@ L’app écoute sur le port 3000, Postgres sur 5432. Les secrets (JWT, Stripe) d
 
 Variables utiles : `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `JWT_ISSUER`, `JWT_AUDIENCE` (optionnel), `REFRESH_TOKEN_TTL_DAYS`, `COOKIE_SECURE`.
 
-## Stripe webhook (local)
+## Stripe webhook (local vs prod)
 
-Le webhook vérifie la signature avec `STRIPE_WEBHOOK_SECRET` (obligatoire au démarrage), répond 200 dès que la signature est valide (ACK), puis traite l’événement en arrière-plan. Pour `checkout.session.completed` avec `metadata.orderId`, la commande est passée en `paid`. **Idempotence** : chaque événement Stripe est enregistré dans `PaymentEvent` (clé unique `stripe_event_id`) avant mise à jour de la commande ; un même `event.id` rejoué est ignoré (une seule mise à jour effective).
+Le webhook vérifie la signature avec `STRIPE_WEBHOOK_SECRET` (obligatoire au démarrage), répond 200 dès que la signature est valide (ACK), puis traite l’événement en arrière-plan. Pour `checkout.session.completed` avec `metadata.orderId`, la commande est passée en `paid`. **Idempotence** : chaque événement Stripe est enregistré dans `PaymentEvent` (clé unique `stripe_event_id`) avant mise à jour de la commande ; un même `event.id` rejoué est ignoré.
 
 - **Variables** : `STRIPE_WEBHOOK_SECRET` (requis), `WEBHOOK_BODY_LIMIT` (défaut 1mb), `RATE_LIMIT_WEBHOOK_*`.
-- **Test en local** : utiliser [Stripe CLI](https://stripe.com/docs/stripe-cli) pour transférer les événements vers l’app (`stripe listen --forward-to localhost:3000/stripe/webhook`) et récupérer le secret temporaire dans la sortie du CLI.
+- **Local** : [Stripe CLI](https://stripe.com/docs/stripe-cli) — `stripe listen --forward-to localhost:3000/stripe/webhook` ; copier le secret `whsec_...` affiché dans la sortie et le mettre dans `.env` comme `STRIPE_WEBHOOK_SECRET`, puis redémarrer l’app.
+- **Prod** : Stripe Dashboard → Developers → Webhooks → Add endpoint (URL publique) ; récupérer le signing secret et le définir en variable d’environnement (pas de valeur par défaut ni de fallback vide).
 
 ## API (OpenAPI)
 

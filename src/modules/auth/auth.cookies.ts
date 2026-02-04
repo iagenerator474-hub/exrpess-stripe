@@ -10,19 +10,22 @@ export function getRefreshTokenFromRequest(req: Request): string | undefined {
   return typeof parsed?.refreshToken === "string" ? parsed.refreshToken : undefined;
 }
 
+/**
+ * Set refresh token cookie. Express res.cookie() expects maxAge in MILLISECONDS.
+ * Guard: do not pass seconds; maxAge must be computed from expiresAt and clamped >= 0.
+ */
 export function setRefreshTokenCookie(
   res: Response,
   refreshToken: string,
   expiresAt: Date
 ): void {
-  const maxAgeMs = expiresAt.getTime() - Date.now();
-  const maxAgeSec = Math.max(0, Math.floor(maxAgeMs / 1000));
+  const maxAgeMs = Math.max(0, expiresAt.getTime() - Date.now());
   res.cookie(COOKIE_NAME, refreshToken, {
     httpOnly: true,
     sameSite: "lax",
     secure: getCookieSecure(),
     path: "/",
-    maxAge: maxAgeSec,
+    maxAge: maxAgeMs, // Express: milliseconds, not seconds
   });
 }
 
