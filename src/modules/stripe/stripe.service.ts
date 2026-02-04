@@ -1,15 +1,12 @@
 import Stripe from "stripe";
 import { config } from "../../config/index.js";
 
-/** Pinned Stripe API version to avoid breaking changes on SDK upgrades. */
-const STRIPE_API_VERSION: Stripe.LatestApiVersion = "2025-02-24.acacia";
-
 let stripeClient: Stripe | null = null;
 
 export function getStripe(): Stripe {
   if (!stripeClient) {
     stripeClient = new Stripe(config.STRIPE_SECRET_KEY, {
-      apiVersion: STRIPE_API_VERSION,
+      apiVersion: config.STRIPE_API_VERSION as Stripe.LatestApiVersion,
     });
   }
   return stripeClient;

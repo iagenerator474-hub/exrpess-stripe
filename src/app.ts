@@ -8,7 +8,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import cors from "cors";
 import rateLimit from "express-rate-limit";
 import { requestId, errorHandler, AppError } from "./middleware/index.js";
-import { getCorsOrigins } from "./config/index.js";
+import { getCorsOrigins, getTrustProxy } from "./config/index.js";
 import { config } from "./config/index.js";
 import { healthRoutes } from "./modules/health/health.routes.js";
 import { authRoutes } from "./modules/auth/auth.routes.js";
@@ -17,6 +17,10 @@ import { stripeWebhookRoutes } from "./modules/stripe/stripe.routes.js";
 
 const app = express();
 
+if (getTrustProxy()) {
+  app.set("trust proxy", 1);
+}
+
 app.use(helmet());
 app.use(requestId);
 
@@ -24,6 +28,7 @@ const origins = getCorsOrigins();
 app.use(
   cors({
     origin: origins === "*" ? true : origins,
+    credentials: origins !== "*",
     optionsSuccessStatus: 200,
   })
 );

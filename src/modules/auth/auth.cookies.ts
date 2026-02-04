@@ -1,5 +1,5 @@
 import type { Request, Response } from "express";
-import { getCookieSecure } from "../../config/index.js";
+import { getCookieSecure, getCookieDomain } from "../../config/index.js";
 
 const COOKIE_NAME = "refreshToken";
 
@@ -20,20 +20,26 @@ export function setRefreshTokenCookie(
   expiresAt: Date
 ): void {
   const maxAgeMs = Math.max(0, expiresAt.getTime() - Date.now());
-  res.cookie(COOKIE_NAME, refreshToken, {
+  const options: { httpOnly: boolean; sameSite: "lax"; secure: boolean; path: string; maxAge: number; domain?: string } = {
     httpOnly: true,
     sameSite: "lax",
     secure: getCookieSecure(),
     path: "/",
     maxAge: maxAgeMs, // Express: milliseconds, not seconds
-  });
+  };
+  const domain = getCookieDomain();
+  if (domain) options.domain = domain;
+  res.cookie(COOKIE_NAME, refreshToken, options);
 }
 
 export function clearRefreshTokenCookie(res: Response): void {
-  res.clearCookie(COOKIE_NAME, {
+  const options: { httpOnly: boolean; sameSite: "lax"; secure: boolean; path: string; domain?: string } = {
     httpOnly: true,
     sameSite: "lax",
     secure: getCookieSecure(),
     path: "/",
-  });
+  };
+  const domain = getCookieDomain();
+  if (domain) options.domain = domain;
+  res.clearCookie(COOKIE_NAME, options);
 }

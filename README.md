@@ -71,7 +71,9 @@ Variables minimales requises : voir `.env.example`. Principales :
 - `COOKIE_SECURE` – cookie refresh en Secure (défaut: `true` si `NODE_ENV=production`)
 - `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` – Stripe
 - `STRIPE_SUCCESS_URL` / `STRIPE_CANCEL_URL` – URLs de redirection Checkout (requises)
-- `CORS_ORIGINS` – origines CORS (séparées par des virgules, ou `*`)
+- `CORS_ORIGINS` – origines CORS (séparées par des virgules ; en prod obligatoire et non `*`)
+- `STRIPE_API_VERSION` – version API Stripe (défaut : 2025-02-24.acacia ; aligner avec Dashboard)
+- `COOKIE_DOMAIN` – (optionnel) domaine du cookie refresh ; `TRUST_PROXY` – (optionnel) `1` si app derrière proxy
 
 ## Docker
 
@@ -91,6 +93,14 @@ docker compose up -d --build
 ```
 
 L’app écoute sur le port 3000. Postgres est exposé sur 5433 (hôte) pour éviter conflit avec un PostgreSQL local sur 5432. Les variables critiques (JWT, Stripe, `STRIPE_WEBHOOK_SECRET`) doivent être fournies ; sans elles, l’app refuse de démarrer avec un message clair.
+
+## Go-live (prod minimale)
+
+**Variables critiques (aucun fallback vide en prod)** : `DATABASE_URL`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL`, `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `CORS_ORIGINS` (liste explicite, pas `*`). Optionnel : `COOKIE_SECURE`, `COOKIE_DOMAIN`, `TRUST_PROXY=1` (si derrière Nginx/Render/Fly), `STRIPE_API_VERSION` (aligner avec Stripe Dashboard).
+
+**Validation** : `docker compose up` → app + Postgres ; `GET /ready` → 200 ; paiement test → webhook reçu → Order en DB en `paid`. En prod HTTPS, cookies refresh avec `Secure` ; si front sur autre domaine, configurer `COOKIE_DOMAIN` et CORS en conséquence.
+
+**Rollback** : redéployer le tag/image précédent. Les migrations Prisma peuvent être irréversibles — tester les migrations en staging avant prod ; en cas de rollback de code, ne pas lancer de migration destructive sans sauvegarde DB.
 
 ## Endpoints
 
@@ -117,9 +127,9 @@ Variables utiles : `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `JWT_ISSUER`, `JWT
 
 Le webhook vérifie la signature avec `STRIPE_WEBHOOK_SECRET` (obligatoire au démarrage), répond 200 dès que la signature est valide (ACK), puis traite l’événement en arrière-plan. Pour `checkout.session.completed` avec `metadata.orderId`, la commande est passée en `paid`. **Idempotence** : chaque événement Stripe est enregistré dans `PaymentEvent` (clé unique `stripe_event_id`) avant mise à jour de la commande ; un même `event.id` rejoué est ignoré.
 
-- **Variables** : `STRIPE_WEBHOOK_SECRET` (requis), `WEBHOOK_BODY_LIMIT` (défaut 1mb), `RATE_LIMIT_WEBHOOK_*`.
-- **Local** : [Stripe CLI](https://stripe.com/docs/stripe-cli) — `stripe listen --forward-to localhost:3000/stripe/webhook` ; copier le secret `whsec_...` affiché dans la sortie et le mettre dans `.env` comme `STRIPE_WEBHOOK_SECRET`, puis redémarrer l’app.
-- **Prod** : Stripe Dashboard → Developers → Webhooks → Add endpoint (URL publique) ; récupérer le signing secret et le définir en variable d’environnement (pas de valeur par défaut ni de fallback vide).
+- **Variables** : `STRIPE_WEBHOOK_SECRET` (requis), `WEBHOOK_BODY_LIMIT` (défaut 1mb), `RATE_LIMIT_WEBHOOK_*`, `STRIPE_API_VERSION` (optionnel ; aligner avec la version du Stripe Dashboard).
+- **Local** : [Stripe CLI](https://stripe.com/docs/stripe-cli) — `stripe listen --forward-to http://localhost:3000/stripe/webhook` ; copier le secret `whsec_...` affiché et le mettre dans `.env` comme `STRIPE_WEBHOOK_SECRET`, puis redémarrer l’app. Utiliser un secret **local** dédié (différent de la prod).
+- **Prod** : Stripe Dashboard → Developers → Webhooks → Add endpoint → URL HTTPS publique (ex. `https://api.example.com/stripe/webhook`) ; événement minimum : `checkout.session.completed`. Récupérer le **signing secret** (whsec_…) et le définir en variable d’environnement (secret **prod** distinct du local).
 
 ## API (OpenAPI)
 

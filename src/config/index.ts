@@ -1,6 +1,9 @@
 import "dotenv/config";
 import { z } from "zod";
 
+/** Default Stripe API version (align with Stripe Dashboard). Override via STRIPE_API_VERSION. */
+const DEFAULT_STRIPE_API_VERSION = "2025-02-24.acacia";
+
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().default(3000),
@@ -14,14 +17,20 @@ const envSchema = z.object({
     .string()
     .optional()
     .transform((v) => v === "true" || v === "1"),
+  COOKIE_DOMAIN: z.string().optional(),
   STRIPE_SECRET_KEY: z.string().startsWith("sk_"),
   STRIPE_SUCCESS_URL: z.string().url(),
   STRIPE_CANCEL_URL: z.string().url(),
   STRIPE_WEBHOOK_SECRET: z.string().startsWith("whsec_"),
+  STRIPE_API_VERSION: z.string().min(1).default(DEFAULT_STRIPE_API_VERSION),
   WEBHOOK_BODY_LIMIT: z.string().default("1mb"),
   CORS_ORIGINS: z.string().default("*"),
   JWT_ISSUER: z.string().min(1).default("express-stripe-auth"),
   JWT_AUDIENCE: z.string().min(1).optional(),
+  TRUST_PROXY: z
+    .string()
+    .optional()
+    .transform((v) => v === "1" || v === "true"),
   RATE_LIMIT_AUTH_WINDOW_MS: z.coerce.number().default(15 * 60 * 1000),
   RATE_LIMIT_AUTH_MAX: z.coerce.number().default(10),
   RATE_LIMIT_REFRESH_WINDOW_MS: z.coerce.number().default(15 * 60 * 1000),
@@ -56,4 +65,13 @@ export function getCorsOrigins(): string[] | "*" {
 export function getCookieSecure(): boolean {
   if (config.COOKIE_SECURE !== undefined) return config.COOKIE_SECURE;
   return config.NODE_ENV === "production";
+}
+
+export function getCookieDomain(): string | undefined {
+  const v = config.COOKIE_DOMAIN;
+  return v && v.trim() ? v.trim() : undefined;
+}
+
+export function getTrustProxy(): boolean {
+  return config.TRUST_PROXY === true;
 }
