@@ -102,6 +102,33 @@ L’app écoute sur le port 3000. Postgres est exposé sur 5433 (hôte) pour év
 
 **Rollback** : redéployer le tag/image précédent. Les migrations Prisma peuvent être irréversibles — tester les migrations en staging avant prod ; en cas de rollback de code, ne pas lancer de migration destructive sans sauvegarde DB.
 
+## Checklist Go-Live client
+
+À valider avant mise en production :
+
+1. **Prérequis** : Node.js >= 18, PostgreSQL, compte Stripe (clés prod si go-live réel).
+2. **Secrets** : aucun fichier `.env` (ou variante) committé ou inclus dans le ZIP livré ; utiliser `.env.example` comme modèle.
+3. **Variables obligatoires** : `DATABASE_URL`, `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL`, `CORS_ORIGINS` (liste explicite, pas `*`).
+4. **CORS** : `CORS_ORIGINS` contient l’origine exacte du front (ex. `https://app.example.com`) ; pas de `*` en prod si cookies.
+5. **Cookies** : en prod HTTPS, `COOKIE_SECURE=true` (défaut si `NODE_ENV=production`) ; `COOKIE_DOMAIN` si front sur sous-domaine.
+6. **Stripe prod** : webhook configuré dans le Dashboard (URL HTTPS publique) ; événement `checkout.session.completed` ; signing secret (whsec_…) défini en env (`STRIPE_WEBHOOK_SECRET`).
+7. **Stripe local** : Stripe CLI pour tests ; secret local distinct du prod.
+8. **Déploiement** : `docker compose up --build` ou `npm run build && npm start` ; entrypoint exécute `prisma migrate deploy` en conteneur.
+9. **Health** : `GET /health` → 200 et `db: "up"` ; `GET /ready` → 200 (pour sonde de l’orchestrateur).
+10. **Validation** : un paiement test de bout en bout (checkout → paiement → retour) ; commande en DB en `status = paid`.
+11. **Proxy** : si l’app est derrière Nginx/Render/Fly, définir `TRUST_PROXY=1`.
+12. **Rollback** : procédure documentée (redéployer tag/image précédent ; attention aux migrations irréversibles).
+13. **Support** : savoir où consulter les logs, `/ready` et les événements Stripe (voir section Support ci-dessous).
+
+## Support
+
+En cas d’erreur ou d’incident :
+
+- **Logs applicatifs** : consulter les logs du processus Node (stdout/stderr) ou du conteneur Docker ; les logs structurés incluent `requestId`, niveaux `info`/`warn`/`error` ; aucun token ni mot de passe ne doit y figurer.
+- **Santé de l’API** : `GET /ready` — si 503, la base de données est injoignable (vérifier `DATABASE_URL`, état de Postgres, réseau). `GET /health` donne un résumé (status, db).
+- **Stripe** : Dashboard → Developers → Webhooks → sélectionner l’endpoint → onglet « Logs » pour voir les événements envoyés et les réponses HTTP ; en cas d’échec (4xx/5xx), vérifier l’URL, le signing secret et les logs backend.
+- **Base de données** : migrations avec `npx prisma migrate deploy` (prod) ; en cas d’échec au démarrage, vérifier que la DB est accessible et que le schéma est à jour.
+
 ## Endpoints
 
 - `GET /health` – Santé (status, env, db) ; 200 si API + DB OK, 503 si DB injoignable

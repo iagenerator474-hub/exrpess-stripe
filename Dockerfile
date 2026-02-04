@@ -18,5 +18,6 @@ COPY --from=builder /app/package.json ./
 COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/entrypoint.sh ./entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
+USER node
 EXPOSE 3000
 ENTRYPOINT ["./entrypoint.sh"]

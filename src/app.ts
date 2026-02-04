@@ -10,6 +10,15 @@ import rateLimit from "express-rate-limit";
 import { requestId, errorHandler, AppError } from "./middleware/index.js";
 import { getCorsOrigins, getTrustProxy } from "./config/index.js";
 import { config } from "./config/index.js";
+
+function isLocalhostOrigin(origin: string): boolean {
+  try {
+    const u = new URL(origin);
+    return u.protocol === "http:" && (u.hostname === "localhost" || u.hostname === "127.0.0.1");
+  } catch {
+    return false;
+  }
+}
 import { healthRoutes } from "./modules/health/health.routes.js";
 import { authRoutes } from "./modules/auth/auth.routes.js";
 import { paymentsRoutes } from "./modules/payments/payments.routes.js";
@@ -27,8 +36,24 @@ app.use(requestId);
 const origins = getCorsOrigins();
 app.use(
   cors({
-    origin: origins === "*" ? true : origins,
-    credentials: origins !== "*",
+    origin:
+      config.NODE_ENV === "development"
+        ? (origin, cb) => {
+            if (origin && isLocalhostOrigin(origin)) {
+              cb(null, origin);
+              return;
+            }
+            if (origins === "*") {
+              cb(null, true);
+              return;
+            }
+            const list = origins as string[];
+            cb(null, origin && list.includes(origin) ? origin : list[0] ?? false);
+          }
+        : origins === "*"
+          ? true
+          : origins,
+    credentials: true,
     optionsSuccessStatus: 200,
   })
 );
