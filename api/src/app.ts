@@ -94,22 +94,23 @@ app.use("/auth", authLimiter, authRoutes);
 app.use("/payments", paymentsRoutes);
 app.use(healthRoutes);
 
-app.get("/", (_req, res) => {
-  res.redirect(302, "/demo");
-});
+const demoEnabled = config.NODE_ENV !== "production" || config.ENABLE_DEMO === true;
+
+if (demoEnabled) {
+  app.get("/", (_req, res) => res.redirect(302, "/demo"));
+  app.get("/demo", (_req, res) => {
+    res.sendFile("index.html", { root: path.join(__dirname, "..", "demo") });
+  });
+  app.get("/demo/", (_req, res) => res.redirect(302, "/demo"));
+  app.use("/demo", express.static(path.join(__dirname, "..", "demo")));
+} else {
+  app.get("/", (_req, res) => res.status(200).json({ status: "ok" }));
+}
 
 app.get("/favicon.ico", (_req, res) => res.status(204).end());
 app.get("/apple-touch-icon.png", (_req, res) => res.status(204).end());
 app.get("/apple-touch-icon-precomposed.png", (_req, res) => res.status(204).end());
 app.get("/robots.txt", (_req, res) => res.type("text/plain").send("User-agent: *\nDisallow:\n"));
-
-app.get("/demo", (_req, res) => {
-  res.sendFile("index.html", { root: path.join(__dirname, "..", "demo") });
-});
-app.get("/demo/", (_req, res) => {
-  res.redirect(302, "/demo");
-});
-app.use("/demo", express.static(path.join(__dirname, "..", "demo")));
 
 app.use((req, _res, next) => {
   next(new AppError(`Not found: ${req.method} ${req.originalUrl}`, 404, "NOT_FOUND"));

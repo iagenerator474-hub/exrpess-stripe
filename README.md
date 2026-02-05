@@ -2,7 +2,7 @@
 
 Backend API pour paiements Stripe Checkout et auth JWT (cookies refresh). PostgreSQL + Prisma, webhook signé et idempotent, rotation des refresh tokens sécurisée (anti double-usage).
 
-**Pourquoi fiable :** Webhook Stripe vérifié par signature, ACK 200 immédiat puis traitement async ; double idempotence (ledger par `stripe_event_id`, ordre passée en `paid` une seule fois par `stripe_session_id`) ; refresh token consommé en transaction (un seul usage). DB = source de vérité.
+**Pourquoi fiable :** Webhook Stripe vérifié par signature, **durable** (persist PaymentEvent puis ACK 200, jamais 2xx avant écriture DB) ; idempotence par `stripe_event_id` ; refresh token consommé en transaction (un seul usage). DB = source de vérité.
 
 ## Quickstart
 
@@ -55,7 +55,7 @@ Si Docker n’est pas disponible (erreur `dockerDesktopLinuxEngine` / « Le fich
 
 1. Client appelle `POST /payments/checkout-session` (auth) → API crée une Order (pending) et une session Stripe, stocke `session.id` dans Order, renvoie l’URL Checkout.
 2. Utilisateur paie sur Stripe ; Stripe envoie `checkout.session.completed` au webhook.
-3. Webhook : signature vérifiée → 200 ACK → en async : insertion PaymentEvent (unique `stripe_event_id`), puis `UPDATE order SET status='paid', paidAt=now() WHERE stripeSessionId=? AND status!='paid'`. Rejeu du même event ou même session = noop.
+3. Webhook : signature vérifiée → persist PaymentEvent → si doublon (P2002) ACK 200 ; sinon mise à jour Order puis ACK 200. En cas d’erreur DB → 500 (Stripe retente). Rejeu du même event = 200 sans retraitement.
 
 **Local** : `stripe listen --forward-to http://localhost:3000/stripe/webhook` ; mettre le `whsec_…` dans `.env` (secret local ≠ prod).  
 **Prod** : Dashboard → Webhooks → URL HTTPS, événement `checkout.session.completed`, signing secret en env.
@@ -65,11 +65,15 @@ Si Docker n’est pas disponible (erreur `dockerDesktopLinuxEngine` / « Le fich
 - **Webhook** : body brut pour la signature ; pas de log du payload complet.
 - **Idempotence** : ledger Stripe (PaymentEvent) + mise à jour Order conditionnelle (`status != 'paid'`).
 - **Refresh token** : un seul usage ; consommation en transaction (`replacedByTokenId` / `revokedAt`). Double appel = un 200, un 401.
-- **Cookies** : httpOnly, SameSite=Lax, Secure en prod. `maxAge` en millisecondes.
+- **Cookies** : httpOnly, SameSite configurable (`COOKIE_SAMESITE=lax|none|strict`), Secure quand SameSite=none ou en prod.
 
 ## Env vars
 
-Voir **`api/.env.example`**. Obligatoires : `DATABASE_URL`, `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL`, `CORS_ORIGINS` (prod : liste explicite). Optionnel : `COOKIE_DOMAIN`, `STRIPE_API_VERSION`.
+Voir **`api/.env.example`**. Obligatoires : `DATABASE_URL`, `JWT_ACCESS_SECRET`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL`, `CORS_ORIGINS` (prod : liste explicite). Optionnel : `COOKIE_DOMAIN`, `COOKIE_SAMESITE`, `STRIPE_API_VERSION`, `ENABLE_DEMO` (prod).
+
+### Front sur autre domaine (cross-site)
+
+Si le front tourne sur un domaine différent de l’API (ex. front `https://app.example.com`, API `https://api.example.com`), le cookie refresh doit être envoyé en requêtes cross-site. Définir **`COOKIE_SAMESITE=none`** et **`COOKIE_SECURE=true`** (obligatoire avec `none`). Optionnel : **`COOKIE_DOMAIN=.example.com`** pour partager le cookie entre sous-domaines. CORS doit autoriser l’origine du front (`CORS_ORIGINS=https://app.example.com`).
 
 **Production derrière un reverse proxy (Nginx, Render, Fly, etc.) :** définir **`TRUST_PROXY=1`** pour que l’API utilise la bonne IP client et les cookies (X-Forwarded-*). Sans cela, l’auth par cookie et le rate-limit peuvent être incorrects. Voir [GO_LIVE_CHECKLIST.md](GO_LIVE_CHECKLIST.md).
 

@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: Express Stripe Auth API
   version: 0.1.0
-  description: Squelette API – health, auth, Stripe webhook
+  description: API – health, auth (JWT + refresh cookie), payments (Stripe Checkout), Stripe webhook (signature verified, durable)
 
 servers:
   - url: http://localhost:3000
@@ -51,7 +51,7 @@ paths:
 
   /auth/register:
     post:
-      summary: Register (not implemented)
+      summary: Register
       operationId: register
       tags: [Auth]
       requestBody:
@@ -59,16 +59,25 @@ paths:
           application/json:
             schema:
               type: object
+              required: [email, password]
               properties:
                 email: { type: string, format: email }
                 password: { type: string, minLength: 8 }
       responses:
-        "501":
-          description: Not implemented
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+        "400":
+          description: Validation error
 
   /auth/login:
     post:
-      summary: Login (not implemented)
+      summary: Login
       operationId: login
       tags: [Auth]
       requestBody:
@@ -76,34 +85,120 @@ paths:
           application/json:
             schema:
               type: object
+              required: [email, password]
               properties:
                 email: { type: string, format: email }
                 password: { type: string }
       responses:
-        "501":
-          description: Not implemented
+        "200":
+          description: OK (sets refresh cookie)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken: { type: string }
+                  user: { $ref: "#/components/schemas/User" }
+        "400":
+          description: Validation error
+        "401":
+          description: Invalid credentials
+
+  /auth/me:
+    get:
+      summary: Current user (Bearer)
+      operationId: getMe
+      tags: [Auth]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+        "401":
+          description: Unauthorized
 
   /auth/refresh:
     post:
-      summary: Refresh token (not implemented)
+      summary: Refresh access token (cookie or body refreshToken)
       operationId: refresh
       tags: [Auth]
       responses:
-        "501":
-          description: Not implemented
+        "200":
+          description: OK (sets new refresh cookie)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken: { type: string }
+                  user: { $ref: "#/components/schemas/User" }
+        "401":
+          description: Invalid or expired refresh token
 
   /auth/logout:
     post:
-      summary: Logout (not implemented)
+      summary: Logout (revoke refresh token, clear cookie)
       operationId: logout
       tags: [Auth]
       responses:
-        "501":
-          description: Not implemented
+        "204":
+          description: No content
+
+  /auth/logout-all:
+    post:
+      summary: Logout all devices for current user (Bearer)
+      operationId: logoutAll
+      tags: [Auth]
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: No content
+        "401":
+          description: Unauthorized
+
+  /payments/checkout-session:
+    post:
+      summary: Create Stripe Checkout session (auth required)
+      operationId: createCheckoutSession
+      tags: [Payments]
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount: { type: integer, description: Amount in cents }
+                currency: { type: string, default: eur }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url: { type: string, format: uri }
+                  sessionId: { type: string }
+        "400":
+          description: Validation error
+        "401":
+          description: Unauthorized
+        "429":
+          description: Too many requests
 
   /stripe/webhook:
     post:
-      summary: Stripe webhook (raw body, signature verification placeholder)
+      summary: Stripe webhook (raw body required; signature verified; durable persist then ACK)
       operationId: stripeWebhook
       tags: [Stripe]
       parameters:
@@ -117,6 +212,28 @@ paths:
             schema: { type: object }
       responses:
         "200":
-          description: Received
+          description: Event received and persisted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  received: { type: boolean }
         "400":
-          description: Bad request (e.g. missing body/signature)
+          description: Bad request (missing/invalid body or signature)
+        "500":
+          description: Server error (persist failed; Stripe will retry)
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    User:
+      type: object
+      properties:
+        id: { type: string }
+        email: { type: string }
+        role: { type: string }

@@ -9,7 +9,9 @@ const router = Router();
 router.post(
   "/webhook",
   express.raw({ type: "application/json", limit: config.WEBHOOK_BODY_LIMIT }),
-  handleStripeWebhook
+  (req, res, next) => {
+    void handleStripeWebhook(req, res).catch(next);
+  }
 );
 
 export const stripeWebhookRoutes = router;

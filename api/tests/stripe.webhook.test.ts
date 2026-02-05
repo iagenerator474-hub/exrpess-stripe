@@ -18,9 +18,6 @@ vi.mock("../src/lib/prisma.js", () => {
   const orderUpdateMany = vi.fn();
   const paymentEventCreate = vi.fn();
   const prismaInstance = {
-    $transaction: vi.fn((cb: (tx: unknown) => unknown) =>
-      typeof cb === "function" ? (cb(prismaInstance) as Promise<unknown>) : Promise.resolve([])
-    ),
     order: { findUnique: orderFindUnique, updateMany: orderUpdateMany },
     paymentEvent: { create: paymentEventCreate },
   };
@@ -37,9 +34,6 @@ describe("POST /stripe/webhook", () => {
     vi.mocked(prisma.order.findUnique).mockReset();
     vi.mocked(prisma.order.updateMany).mockReset();
     vi.mocked(prisma.paymentEvent.create).mockReset();
-    vi.mocked(prisma.$transaction).mockImplementation((cb: (tx: unknown) => unknown) =>
-      typeof cb === "function" ? (cb(prisma) as Promise<unknown>) : Promise.resolve([])
-    );
   });
 
   it("returns 400 when stripe-signature header is missing", async () => {
@@ -69,6 +63,15 @@ describe("POST /stripe/webhook", () => {
       id: "evt_123",
       type: "ping",
       data: { object: {} },
+    });
+    vi.mocked(prisma.paymentEvent.create).mockResolvedValueOnce({
+      id: "pe-ping",
+      orderId: null,
+      orphaned: true,
+      stripeEventId: "evt_123",
+      type: "ping",
+      payload: null,
+      processedAt: new Date(),
     });
     const res = await request(app)
       .post("/stripe/webhook")
@@ -110,8 +113,6 @@ describe("POST /stripe/webhook", () => {
       .send(rawBody);
     expect(res.status).toBe(200);
 
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
     expect(prisma.paymentEvent.create).toHaveBeenCalledWith({
       data: {
         stripeEventId: "evt_cs_completed",
@@ -127,7 +128,31 @@ describe("POST /stripe/webhook", () => {
     });
   });
 
-  it("replay same checkout.session.completed 5 times results in single PaymentEvent and single Order update", async () => {
+  it("returns 500 when paymentEvent.create fails (non-P2002)", async () => {
+    constructEventMock.mockReturnValueOnce({
+      id: "evt_500",
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: "cs_500",
+          metadata: { orderId: "order-1" },
+          client_reference_id: "order-1",
+        },
+      },
+    });
+    vi.mocked(prisma.order.findUnique).mockResolvedValue({ id: "order-1" });
+    vi.mocked(prisma.paymentEvent.create).mockRejectedValueOnce(new Error("DB unavailable"));
+
+    const res = await request(app)
+      .post("/stripe/webhook")
+      .set("Content-Type", "application/json")
+      .set("stripe-signature", "v1,valid")
+      .send(rawBody);
+    expect(res.status).toBe(500);
+    expect(prisma.order.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("replay same checkout.session.completed 5 times: duplicate returns 200 without retriggering order update", async () => {
     const sameEvent = {
       id: "evt_replay_id",
       type: "checkout.session.completed",
@@ -169,9 +194,6 @@ describe("POST /stripe/webhook", () => {
     const responses = await Promise.all([send(), send(), send(), send(), send()]);
     responses.forEach((r) => expect(r.status).toBe(200));
 
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
-
     expect(prisma.paymentEvent.create).toHaveBeenCalledTimes(5);
     expect(prisma.order.updateMany).toHaveBeenCalledTimes(1);
     expect(prisma.order.updateMany).toHaveBeenCalledWith({
@@ -207,11 +229,17 @@ describe("POST /stripe/webhook", () => {
       .post("/stripe/webhook")
       .set("Content-Type", "application/json")
       .set("stripe-signature", "v1,orphan")
-      .send(Buffer.from(JSON.stringify({ id: "evt_orphan", type: "checkout.session.completed", data: { object: { id: "cs_orphan", metadata: { orderId: "order-missing" } } } })));
+      .send(
+        Buffer.from(
+          JSON.stringify({
+            id: "evt_orphan",
+            type: "checkout.session.completed",
+            data: { object: { id: "cs_orphan", metadata: { orderId: "order-missing" } } },
+          })
+        )
+      );
     expect(res.status).toBe(200);
 
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
     expect(prisma.paymentEvent.create).toHaveBeenCalledWith({
       data: {
         stripeEventId: "evt_orphan",
@@ -224,7 +252,7 @@ describe("POST /stripe/webhook", () => {
     expect(prisma.order.updateMany).not.toHaveBeenCalled();
   });
 
-  it("uses transaction (create PaymentEvent + updateMany Order) for crash-safe processing", async () => {
+  it("durable: create PaymentEvent then updateMany Order before ACK 200", async () => {
     constructEventMock.mockReturnValueOnce({
       id: "evt_tx",
       type: "checkout.session.completed",
@@ -237,9 +265,6 @@ describe("POST /stripe/webhook", () => {
       },
     });
     vi.mocked(prisma.order.findUnique).mockResolvedValue({ id: "order-tx" });
-    vi.mocked(prisma.$transaction).mockImplementationOnce((cb) =>
-      typeof cb === "function" ? (cb(prisma) as Promise<unknown>) : Promise.resolve([])
-    );
     vi.mocked(prisma.paymentEvent.create).mockResolvedValueOnce({
       id: "pe-tx",
       orderId: "order-tx",
@@ -255,12 +280,17 @@ describe("POST /stripe/webhook", () => {
       .post("/stripe/webhook")
       .set("Content-Type", "application/json")
       .set("stripe-signature", "v1,tx")
-      .send(Buffer.from(JSON.stringify({ id: "evt_tx", type: "checkout.session.completed", data: { object: { id: "cs_tx", metadata: { orderId: "order-tx" } } } })));
+      .send(
+        Buffer.from(
+          JSON.stringify({
+            id: "evt_tx",
+            type: "checkout.session.completed",
+            data: { object: { id: "cs_tx", metadata: { orderId: "order-tx" } } },
+          })
+        )
+      );
     expect(res.status).toBe(200);
 
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
-    expect(prisma.$transaction).toHaveBeenCalled();
     expect(prisma.paymentEvent.create).toHaveBeenCalled();
     expect(prisma.order.updateMany).toHaveBeenCalled();
   });

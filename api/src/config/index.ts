@@ -8,14 +8,13 @@ const envSchema = z.object({
   PORT: z.coerce.number().default(3000),
   DATABASE_URL: z.string().min(1),
   JWT_ACCESS_SECRET: z.string().min(16),
-  JWT_REFRESH_SECRET: z.string().min(16),
   JWT_ACCESS_EXPIRES_IN: z.string().default("15m"),
-  JWT_REFRESH_EXPIRES_IN: z.string().default("7d"),
   REFRESH_TOKEN_TTL_DAYS: z.coerce.number().min(1).max(365).default(30),
   COOKIE_SECURE: z
     .string()
     .optional()
     .transform((v) => v === "true" || v === "1"),
+  COOKIE_SAMESITE: z.enum(["lax", "none", "strict"]).default("lax"),
   COOKIE_DOMAIN: z.string().optional(),
   STRIPE_SECRET_KEY: z.string().startsWith("sk_"),
   STRIPE_SUCCESS_URL: z.string().url(),
@@ -38,6 +37,10 @@ const envSchema = z.object({
   RATE_LIMIT_WEBHOOK_MAX: z.coerce.number().default(100),
   RATE_LIMIT_CHECKOUT_WINDOW_MS: z.coerce.number().default(60 * 1000),
   RATE_LIMIT_CHECKOUT_MAX: z.coerce.number().default(30),
+  ENABLE_DEMO: z
+    .string()
+    .optional()
+    .transform((v) => v === "1" || v === "true"),
 });
 
 export type Config = z.infer<typeof envSchema>;
@@ -65,7 +68,12 @@ export function getCorsOrigins(): string[] | "*" {
 
 export function getCookieSecure(): boolean {
   if (config.COOKIE_SECURE !== undefined) return config.COOKIE_SECURE;
+  if (config.COOKIE_SAMESITE === "none") return true;
   return config.NODE_ENV === "production";
+}
+
+export function getCookieSameSite(): "lax" | "none" | "strict" {
+  return config.COOKIE_SAMESITE;
 }
 
 export function getCookieDomain(): string | undefined {

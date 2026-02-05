@@ -1,5 +1,5 @@
 import type { Request, Response } from "express";
-import { getCookieSecure, getCookieDomain } from "../../config/index.js";
+import { getCookieSecure, getCookieDomain, getCookieSameSite } from "../../config/index.js";
 
 const COOKIE_NAME = "refreshToken";
 
@@ -10,16 +10,17 @@ export function getRefreshTokenFromRequest(req: Request): string | undefined {
   return typeof parsed?.refreshToken === "string" ? parsed.refreshToken : undefined;
 }
 
-/** Cookie refresh: httpOnly, sameSite=lax, secure in prod. maxAge in milliseconds (Express). */
+/** Cookie refresh: httpOnly, sameSite from config (lax|none|strict), Secure when sameSite=none or prod. */
 export function setRefreshTokenCookie(
   res: Response,
   refreshToken: string,
   expiresAt: Date
 ): void {
   const maxAgeMs = Math.max(0, expiresAt.getTime() - Date.now());
-  const options: { httpOnly: boolean; sameSite: "lax"; secure: boolean; path: string; maxAge: number; domain?: string } = {
+  const sameSite = getCookieSameSite();
+  const options: { httpOnly: boolean; sameSite: "lax" | "none" | "strict"; secure: boolean; path: string; maxAge: number; domain?: string } = {
     httpOnly: true,
-    sameSite: "lax",
+    sameSite,
     secure: getCookieSecure(),
     path: "/",
     maxAge: maxAgeMs,
@@ -30,9 +31,10 @@ export function setRefreshTokenCookie(
 }
 
 export function clearRefreshTokenCookie(res: Response): void {
-  const options: { httpOnly: boolean; sameSite: "lax"; secure: boolean; path: string; domain?: string } = {
+  const sameSite = getCookieSameSite();
+  const options: { httpOnly: boolean; sameSite: "lax" | "none" | "strict"; secure: boolean; path: string; domain?: string } = {
     httpOnly: true,
-    sameSite: "lax",
+    sameSite,
     secure: getCookieSecure(),
     path: "/",
   };
