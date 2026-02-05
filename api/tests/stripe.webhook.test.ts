@@ -86,7 +86,7 @@ describe("POST /stripe/webhook", () => {
     expect(res.body).toEqual({ received: true });
   });
 
-  it("on checkout.session.completed with metadata.orderId updates Order to paid", async () => {
+  it("on checkout.session.completed with payment_status paid and amount/currency OK updates Order to paid", async () => {
     constructEventMock.mockReturnValueOnce({
       id: "evt_cs_completed",
       type: "checkout.session.completed",
@@ -95,6 +95,7 @@ describe("POST /stripe/webhook", () => {
           id: "cs_session_123",
           amount_total: 1000,
           currency: "eur",
+          payment_status: "paid",
           metadata: { orderId: "order-1" },
           client_reference_id: "order-1",
         },
@@ -145,6 +146,7 @@ describe("POST /stripe/webhook", () => {
           id: "cs_500",
           amount_total: 1000,
           currency: "eur",
+          payment_status: "paid",
           metadata: { orderId: "order-1" },
           client_reference_id: "order-1",
         },
@@ -173,6 +175,7 @@ describe("POST /stripe/webhook", () => {
           id: "cs_replay",
           amount_total: 1999,
           currency: "eur",
+          payment_status: "paid",
           metadata: { orderId: "order-replay" },
           client_reference_id: "order-replay",
         },
@@ -217,6 +220,65 @@ describe("POST /stripe/webhook", () => {
     });
   });
 
+  it("on payment_status unpaid: stores PaymentEvent as orphaned, does not update Order, returns 200", async () => {
+    constructEventMock.mockReturnValueOnce({
+      id: "evt_unpaid",
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: "cs_unpaid",
+          amount_total: 1000,
+          currency: "eur",
+          payment_status: "unpaid",
+          metadata: { orderId: "order-1" },
+          client_reference_id: "order-1",
+        },
+      },
+    });
+    vi.mocked(prisma.paymentEvent.create).mockResolvedValueOnce({
+      id: "pe-unpaid",
+      orderId: "order-1",
+      orphaned: true,
+      stripeEventId: "evt_unpaid",
+      type: "checkout.session.completed",
+      payload: null,
+      receivedAt: new Date(),
+    });
+
+    const res = await request(app)
+      .post("/stripe/webhook")
+      .set("Content-Type", "application/json")
+      .set("stripe-signature", "v1,unpaid")
+      .send(
+        Buffer.from(
+          JSON.stringify({
+            id: "evt_unpaid",
+            type: "checkout.session.completed",
+            data: {
+              object: {
+                id: "cs_unpaid",
+                amount_total: 1000,
+                currency: "eur",
+                payment_status: "unpaid",
+                metadata: { orderId: "order-1" },
+                client_reference_id: "order-1",
+              },
+            },
+          })
+        )
+      );
+    expect(res.status).toBe(200);
+    expect(prisma.paymentEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        stripeEventId: "evt_unpaid",
+        orderId: "order-1",
+        orphaned: true,
+      }),
+    });
+    expect(prisma.order.findUnique).not.toHaveBeenCalled();
+    expect(prisma.order.updateMany).not.toHaveBeenCalled();
+  });
+
   it("stores event as orphaned when order not found", async () => {
     constructEventMock.mockReturnValueOnce({
       id: "evt_orphan",
@@ -224,6 +286,7 @@ describe("POST /stripe/webhook", () => {
       data: {
         object: {
           id: "cs_orphan",
+          payment_status: "paid",
           metadata: { orderId: "order-missing" },
           client_reference_id: "order-missing",
         },
@@ -276,6 +339,7 @@ describe("POST /stripe/webhook", () => {
           id: "cs_mismatch",
           amount_total: 999,
           currency: "eur",
+          payment_status: "paid",
           metadata: { orderId: "order-1" },
           client_reference_id: "order-1",
         },
@@ -333,6 +397,7 @@ describe("POST /stripe/webhook", () => {
           id: "cs_tx",
           amount_total: 500,
           currency: "eur",
+          payment_status: "paid",
           metadata: { orderId: "order-tx" },
           client_reference_id: "order-tx",
         },

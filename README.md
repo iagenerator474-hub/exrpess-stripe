@@ -55,7 +55,7 @@ Si Docker n’est pas disponible (erreur `dockerDesktopLinuxEngine` / « Le fich
 
 1. Client appelle `POST /payments/checkout-session` (auth) → API crée une Order (pending) et une session Stripe, stocke `session.id` dans Order, renvoie l’URL Checkout.
 2. Utilisateur paie sur Stripe ; Stripe envoie `checkout.session.completed` au webhook.
-3. Webhook : signature vérifiée → persist PaymentEvent → si doublon (P2002) ACK 200 ; sinon mise à jour Order puis ACK 200. En cas d’erreur DB → 500 (Stripe retente). Rejeu du même event = 200 sans retraitement.
+3. Webhook : signature vérifiée → persist PaymentEvent → si doublon (P2002) ACK 200 ; sinon mise à jour Order puis ACK 200. En cas d’erreur DB → 500 (Stripe retente). Rejeu du même event = 200 sans retraitement. **Seules les sessions avec `payment_status === "paid"`** déclenchent le passage de la commande en paid ; `unpaid` / `no_payment_required` sont enregistrées en orphan (audit) et la commande reste dans son statut actuel (ex. `created`).
 
 **Local** : `stripe listen --forward-to http://localhost:3000/stripe/webhook` ; mettre le `whsec_…` dans `.env` (secret local ≠ prod).  
 **Prod** : Dashboard → Webhooks → URL HTTPS, événement `checkout.session.completed`, signing secret en env.

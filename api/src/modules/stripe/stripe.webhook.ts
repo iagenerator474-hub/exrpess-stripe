@@ -72,6 +72,7 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
       const session = event.data.object as Stripe.Checkout.Session;
       const orderIdFromEvent = session.metadata?.orderId ?? session.client_reference_id ?? null;
       const sessionId = session.id;
+      const paymentStatus = session.payment_status ?? "";
 
       const payloadSnapshot: Record<string, unknown> = {
         stripeEventId: event.id,
@@ -85,7 +86,18 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
       let orderId: string | null = orderIdFromEvent;
       let orphaned = !orderIdFromEvent;
 
-      if (orderIdFromEvent) {
+      if (paymentStatus !== "paid") {
+        orphaned = true;
+        if (orderIdFromEvent) {
+          logger.warn("checkout.session.completed payment not paid, order not updated", {
+            requestId,
+            stripeEventId,
+            stripeSessionId: sessionId,
+            orderId: orderIdFromEvent,
+            payment_status: paymentStatus,
+          });
+        }
+      } else if (orderIdFromEvent) {
         const orderRow = await prisma.order.findUnique({
           where: { id: orderIdFromEvent },
           select: { id: true, amountCents: true, currency: true },
