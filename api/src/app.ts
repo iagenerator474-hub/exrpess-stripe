@@ -40,7 +40,11 @@ app.use(
     origin:
       config.NODE_ENV === "development"
         ? (origin, cb) => {
-            if (origin && isLocalhostOrigin(origin)) {
+            if (!origin) {
+              cb(null, true);
+              return;
+            }
+            if (origins === "*" && isLocalhostOrigin(origin)) {
               cb(null, origin);
               return;
             }
@@ -49,11 +53,18 @@ app.use(
               return;
             }
             const list = origins as string[];
-            cb(null, origin && list.includes(origin) ? origin : list[0] ?? false);
+            cb(null, list.includes(origin) ? origin : false);
           }
         : origins === "*"
           ? true
-          : origins,
+          : (origin, cb) => {
+              if (!origin) {
+                cb(null, true);
+                return;
+              }
+              const list = origins as string[];
+              cb(null, list.includes(origin) ? origin : false);
+            },
     credentials: true,
     optionsSuccessStatus: 200,
   })

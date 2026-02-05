@@ -53,11 +53,12 @@ model Order {
 
 model PaymentEvent {
   id            String   @id @default(cuid())
-  orderId       String   @map("order_id")
+  orderId       String?  @map("order_id") // null when order missing (orphaned event)
+  orphaned      Boolean  @default(false) @map("orphaned") // true when orderId null / order not found
   stripeEventId String   @unique @map("stripe_event_id") // idempotency key
   type          String   // e.g. checkout.session.completed, payment_intent.succeeded
   payload       Json?    // raw or relevant payload snapshot
   processedAt   DateTime @default(now()) @map("processed_at")
 
-  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order Order? @relation(fields: [orderId], references: [id], onDelete: Cascade)
 }

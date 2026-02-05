@@ -1,13 +1,24 @@
 import { Router, Request, Response, NextFunction } from "express";
+import rateLimit from "express-rate-limit";
 import { authGuard } from "../../middleware/authGuard.js";
+import { config } from "../../config/index.js";
 import { checkoutSessionBodySchema } from "./checkout.validation.js";
 import * as checkoutService from "./checkout.service.js";
 import { AppError } from "../../middleware/errorHandler.js";
 
 const router = Router();
 
+const checkoutLimiter = rateLimit({
+  windowMs: config.RATE_LIMIT_CHECKOUT_WINDOW_MS,
+  max: config.RATE_LIMIT_CHECKOUT_MAX,
+  message: { error: "Too many checkout attempts" },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 router.post(
   "/checkout-session",
+  checkoutLimiter,
   authGuard,
   async (req: Request, res: Response, next: NextFunction) => {
     try {

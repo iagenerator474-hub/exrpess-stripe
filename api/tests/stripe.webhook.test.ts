@@ -14,13 +14,14 @@ vi.mock("../src/modules/stripe/stripe.service.js", async (importOriginal) => {
 });
 
 vi.mock("../src/lib/prisma.js", () => {
+  const orderFindUnique = vi.fn();
   const orderUpdateMany = vi.fn();
   const paymentEventCreate = vi.fn();
   const prismaInstance = {
     $transaction: vi.fn((cb: (tx: unknown) => unknown) =>
       typeof cb === "function" ? (cb(prismaInstance) as Promise<unknown>) : Promise.resolve([])
     ),
-    order: { updateMany: orderUpdateMany },
+    order: { findUnique: orderFindUnique, updateMany: orderUpdateMany },
     paymentEvent: { create: paymentEventCreate },
   };
   return { prisma: prismaInstance };
@@ -33,6 +34,7 @@ const rawBody = Buffer.from(JSON.stringify({ type: "test", id: "evt_1" }));
 describe("POST /stripe/webhook", () => {
   beforeEach(() => {
     constructEventMock.mockReset();
+    vi.mocked(prisma.order.findUnique).mockReset();
     vi.mocked(prisma.order.updateMany).mockReset();
     vi.mocked(prisma.paymentEvent.create).mockReset();
     vi.mocked(prisma.$transaction).mockImplementation((cb: (tx: unknown) => unknown) =>
@@ -89,9 +91,11 @@ describe("POST /stripe/webhook", () => {
         },
       },
     });
+    vi.mocked(prisma.order.findUnique).mockResolvedValue({ id: "order-1" });
     vi.mocked(prisma.paymentEvent.create).mockResolvedValueOnce({
       id: "pe-1",
       orderId: "order-1",
+      orphaned: false,
       stripeEventId: "evt_cs_completed",
       type: "checkout.session.completed",
       payload: null,
@@ -113,6 +117,7 @@ describe("POST /stripe/webhook", () => {
         stripeEventId: "evt_cs_completed",
         type: "checkout.session.completed",
         orderId: "order-1",
+        orphaned: false,
         payload: expect.any(Object),
       },
     });
@@ -135,11 +140,13 @@ describe("POST /stripe/webhook", () => {
       },
     };
     constructEventMock.mockReturnValue(sameEvent);
+    vi.mocked(prisma.order.findUnique).mockResolvedValue({ id: "order-replay" });
 
     vi.mocked(prisma.paymentEvent.create)
       .mockResolvedValueOnce({
         id: "pe-replay",
         orderId: "order-replay",
+        orphaned: false,
         stripeEventId: "evt_replay_id",
         type: "checkout.session.completed",
         payload: null,
@@ -173,6 +180,50 @@ describe("POST /stripe/webhook", () => {
     });
   });
 
+  it("stores event as orphaned when order not found", async () => {
+    constructEventMock.mockReturnValueOnce({
+      id: "evt_orphan",
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: "cs_orphan",
+          metadata: { orderId: "order-missing" },
+          client_reference_id: "order-missing",
+        },
+      },
+    });
+    vi.mocked(prisma.order.findUnique).mockResolvedValue(null);
+    vi.mocked(prisma.paymentEvent.create).mockResolvedValueOnce({
+      id: "pe-orphan",
+      orderId: null,
+      orphaned: true,
+      stripeEventId: "evt_orphan",
+      type: "checkout.session.completed",
+      payload: null,
+      processedAt: new Date(),
+    });
+
+    const res = await request(app)
+      .post("/stripe/webhook")
+      .set("Content-Type", "application/json")
+      .set("stripe-signature", "v1,orphan")
+      .send(Buffer.from(JSON.stringify({ id: "evt_orphan", type: "checkout.session.completed", data: { object: { id: "cs_orphan", metadata: { orderId: "order-missing" } } } })));
+    expect(res.status).toBe(200);
+
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    expect(prisma.paymentEvent.create).toHaveBeenCalledWith({
+      data: {
+        stripeEventId: "evt_orphan",
+        type: "checkout.session.completed",
+        orderId: null,
+        orphaned: true,
+        payload: expect.any(Object),
+      },
+    });
+    expect(prisma.order.updateMany).not.toHaveBeenCalled();
+  });
+
   it("uses transaction (create PaymentEvent + updateMany Order) for crash-safe processing", async () => {
     constructEventMock.mockReturnValueOnce({
       id: "evt_tx",
@@ -185,12 +236,14 @@ describe("POST /stripe/webhook", () => {
         },
       },
     });
+    vi.mocked(prisma.order.findUnique).mockResolvedValue({ id: "order-tx" });
     vi.mocked(prisma.$transaction).mockImplementationOnce((cb) =>
       typeof cb === "function" ? (cb(prisma) as Promise<unknown>) : Promise.resolve([])
     );
     vi.mocked(prisma.paymentEvent.create).mockResolvedValueOnce({
       id: "pe-tx",
       orderId: "order-tx",
+      orphaned: false,
       stripeEventId: "evt_tx",
       type: "checkout.session.completed",
       payload: null,

@@ -16,6 +16,7 @@ export default defineConfig({
       STRIPE_WEBHOOK_SECRET: "whsec_placeholder",
       RATE_LIMIT_AUTH_MAX: "100",
       RATE_LIMIT_REFRESH_MAX: "100",
+      RATE_LIMIT_CHECKOUT_MAX: "100",
       REFRESH_TOKEN_TTL_DAYS: "30",
     },
   },

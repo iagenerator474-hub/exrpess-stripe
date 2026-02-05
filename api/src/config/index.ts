@@ -36,6 +36,8 @@ const envSchema = z.object({
   RATE_LIMIT_REFRESH_MAX: z.coerce.number().default(30),
   RATE_LIMIT_WEBHOOK_WINDOW_MS: z.coerce.number().default(60 * 1000),
   RATE_LIMIT_WEBHOOK_MAX: z.coerce.number().default(100),
+  RATE_LIMIT_CHECKOUT_WINDOW_MS: z.coerce.number().default(60 * 1000),
+  RATE_LIMIT_CHECKOUT_MAX: z.coerce.number().default(30),
 });
 
 export type Config = z.infer<typeof envSchema>;

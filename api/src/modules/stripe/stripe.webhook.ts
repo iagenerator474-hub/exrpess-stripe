@@ -15,78 +15,115 @@ export function verifyWebhookEvent(
   return stripe.webhooks.constructEvent(rawBody, signature, webhookSecret);
 }
 
-/** Process after ACK. Ledger: PaymentEvent (unique stripeEventId). Business: Order paid once per stripeSessionId (update where status != 'paid'). */
+/** Process after ACK. Ledger: always create PaymentEvent first (idempotence). If Order missing => orphaned event, no throw. */
 function processEvent(event: Stripe.Event, requestId?: string): void {
   const meta = { requestId, stripeEventId: event.id, type: event.type };
 
   if (event.type === "checkout.session.completed") {
     const session = event.data.object as Stripe.Checkout.Session;
-    const orderId = session.metadata?.orderId ?? session.client_reference_id;
+    const orderIdFromEvent = session.metadata?.orderId ?? session.client_reference_id ?? null;
     const sessionId = session.id;
-
-    if (!orderId) {
-      logger.warn("checkout.session.completed missing orderId in metadata", { ...meta, stripeSessionId: sessionId });
-      return;
-    }
 
     const payloadSnapshot = {
       type: event.type,
       stripeEventId: event.id,
-      orderId,
+      orderId: orderIdFromEvent,
       stripeSessionId: sessionId,
       amount_total: session.amount_total ?? undefined,
       currency: session.currency ?? undefined,
       payment_status: session.payment_status ?? undefined,
     };
 
-    void prisma
-      .$transaction(async (tx) => {
-        await tx.paymentEvent.create({
-          data: {
-            stripeEventId: event.id,
-            type: event.type,
-            orderId,
-            payload: payloadSnapshot,
-          },
-        });
-        return tx.order.updateMany({
-          where: {
-            id: orderId,
+    void (async () => {
+      try {
+        if (!orderIdFromEvent) {
+          await prisma.paymentEvent.create({
+            data: {
+              stripeEventId: event.id,
+              type: event.type,
+              orderId: null,
+              orphaned: true,
+              payload: payloadSnapshot,
+            },
+          });
+          logger.warn("checkout.session.completed missing orderId in metadata, event stored as orphaned", {
+            ...meta,
             stripeSessionId: sessionId,
-            status: { not: "paid" },
-          },
-          data: { status: "paid", paidAt: new Date() },
+          });
+          return;
+        }
+
+        const orderExists = await prisma.order.findUnique({
+          where: { id: orderIdFromEvent },
+          select: { id: true },
         });
-      })
-      .then((r) => {
-        const outcome = r.count > 0 ? "updated_order" : "noop";
+
+        if (!orderExists) {
+          await prisma.paymentEvent.create({
+            data: {
+              stripeEventId: event.id,
+              type: event.type,
+              orderId: null,
+              orphaned: true,
+              payload: payloadSnapshot,
+            },
+          });
+          logger.warn("checkout.session.completed order not found, event stored as orphaned", {
+            ...meta,
+            orderId: orderIdFromEvent,
+            stripeSessionId: sessionId,
+          });
+          return;
+        }
+
+        const result = await prisma.$transaction(async (tx) => {
+          await tx.paymentEvent.create({
+            data: {
+              stripeEventId: event.id,
+              type: event.type,
+              orderId: orderIdFromEvent,
+              orphaned: false,
+              payload: payloadSnapshot,
+            },
+          });
+          return tx.order.updateMany({
+            where: {
+              id: orderIdFromEvent,
+              stripeSessionId: sessionId,
+              status: { not: "paid" },
+            },
+            data: { status: "paid", paidAt: new Date() },
+          });
+        });
+
+        const outcome = result.count > 0 ? "updated_order" : "noop";
         logger.info("Stripe webhook outcome", {
           requestId,
           stripeEventId: event.id,
           stripeSessionId: sessionId,
-          orderId,
+          orderId: orderIdFromEvent,
           outcome,
         });
-      })
-      .catch((err: { code?: string }) => {
-        if (err?.code === "P2002") {
-          logger.info("Stripe webhook outcome", {
+      } catch (err: unknown) {
+        const code = err && typeof err === "object" && "code" in err ? (err as { code?: string }).code : undefined;
+        if (code === "P2002") {
+          logger.info("Stripe webhook duplicate ignored", {
             requestId,
             stripeEventId: event.id,
             stripeSessionId: sessionId,
-            orderId,
-            outcome: "already_processed",
+            orderId: orderIdFromEvent,
           });
           return;
         }
         logger.error("Webhook processing failed", {
           requestId,
-          orderId,
+          orderId: orderIdFromEvent,
           stripeSessionId: sessionId,
           stripeEventId: event.id,
           error: String(err),
         });
-      });
+      }
+    })();
   } else {
     logger.info("Stripe webhook event", { ...meta, stripeSessionId: (event.data?.object as { id?: string })?.id });
   }

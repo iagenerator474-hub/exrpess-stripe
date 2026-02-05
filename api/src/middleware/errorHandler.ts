@@ -20,23 +20,31 @@ export function errorHandler(
   _next: NextFunction
 ): void {
   const requestId = req.requestId;
-  const statusCode = err instanceof AppError ? err.statusCode : 500;
-  const message =
-    err instanceof AppError
+  const isAppError = err instanceof AppError;
+  const statusCode = isAppError ? err.statusCode : 500;
+  const serverMessage = isAppError
+    ? err.message
+    : err instanceof Error
       ? err.message
-      : err instanceof Error
-        ? err.message
-        : "Internal server error";
+      : "Internal server error";
 
-  logger.error(message, {
+  // Always log server-side: message, stack, requestId, route (prod-safe)
+  logger.error(serverMessage, {
     requestId,
     statusCode,
-    ...(process.env.NODE_ENV !== "production" &&
-      err instanceof Error && { stack: err.stack }),
+    method: req.method,
+    path: req.path,
+    ...(err instanceof Error && { stack: err.stack }),
   });
 
+  // Client: AppError => expose message; non-AppError => prod = generic 500 only
+  const clientMessage =
+    isAppError || process.env.NODE_ENV === "development"
+      ? serverMessage
+      : "Internal server error";
+
   const body: Record<string, unknown> = {
-    error: message,
+    error: clientMessage,
     ...(requestId && { requestId }),
     ...(statusCode === 404 && { path: req.method + " " + req.originalUrl }),
     ...(process.env.NODE_ENV === "development" && err instanceof Error && { stack: err.stack }),
