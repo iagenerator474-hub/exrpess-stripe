@@ -58,7 +58,7 @@ model PaymentEvent {
   stripeEventId String   @unique @map("stripe_event_id") // idempotency key
   type          String   // e.g. checkout.session.completed, payment_intent.succeeded
   payload       Json?    // raw or relevant payload snapshot
-  processedAt   DateTime @default(now()) @map("processed_at")
+  receivedAt    DateTime @default(now()) @map("received_at") // when event was persisted (webhook receipt)
 
   order Order? @relation(fields: [orderId], references: [id], onDelete: SetNull)
 }

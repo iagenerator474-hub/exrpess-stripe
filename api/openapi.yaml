@@ -71,15 +71,18 @@ paths:
               schema:
                 type: object
                 properties:
-                  user: { $ref: "#/components/schemas/User" }
+                  user: { $ref: "#/components/schemas/UserWithCreatedAt" }
         "400":
           description: Validation error
+        "409":
+          description: Email already registered
 
   /auth/login:
     post:
       summary: Login
       operationId: login
       tags: [Auth]
+      description: On success, the refresh token is set in a HttpOnly cookie (Set-Cookie) for use with POST /auth/refresh. Response body contains accessToken and user only.
       requestBody:
         content:
           application/json:
@@ -91,7 +94,7 @@ paths:
                 password: { type: string }
       responses:
         "200":
-          description: OK (sets refresh cookie)
+          description: OK. Sets refresh token in HttpOnly cookie.
           content:
             application/json:
               schema:
@@ -143,12 +146,13 @@ paths:
 
   /auth/logout:
     post:
-      summary: Logout (revoke refresh token, clear cookie)
+      summary: Logout
       operationId: logout
       tags: [Auth]
+      description: Revokes the refresh token (from cookie or body) and clears the refresh cookie if present.
       responses:
         "204":
-          description: No content
+          description: No content (refresh cookie cleared)
 
   /auth/logout-all:
     post:
@@ -165,9 +169,10 @@ paths:
 
   /payments/checkout-session:
     post:
-      summary: Create Stripe Checkout session (auth required)
+      summary: Create Stripe Checkout session
       operationId: createCheckoutSession
       tags: [Payments]
+      description: Protected by Bearer JWT. Creates an order and a Stripe Checkout session; client redirects user to checkoutUrl.
       security:
         - bearerAuth: []
       requestBody:
@@ -187,14 +192,21 @@ paths:
               schema:
                 type: object
                 properties:
-                  url: { type: string, format: uri }
-                  sessionId: { type: string }
+                  checkoutUrl: { type: string, format: uri, description: Stripe Checkout URL to redirect the user to }
+                  stripeSessionId: { type: string, description: Stripe session id }
+                  orderId: { type: string, description: Created order id }
+                example:
+                  checkoutUrl: "https://checkout.stripe.com/c/pay/cs_xxx"
+                  stripeSessionId: "cs_xxx"
+                  orderId: "clxxx"
         "400":
           description: Validation error
         "401":
-          description: Unauthorized
+          description: Unauthorized (missing or invalid Bearer token)
         "429":
           description: Too many requests
+        "502":
+          description: Payment setup failed (Stripe error)
 
   /stripe/webhook:
     post:
@@ -237,3 +249,10 @@ components:
         id: { type: string }
         email: { type: string }
         role: { type: string }
+    UserWithCreatedAt:
+      type: object
+      properties:
+        id: { type: string }
+        email: { type: string }
+        role: { type: string }
+        createdAt: { type: string, format: date-time }

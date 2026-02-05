@@ -71,7 +71,7 @@ describe("POST /stripe/webhook", () => {
       stripeEventId: "evt_123",
       type: "ping",
       payload: null,
-      processedAt: new Date(),
+      receivedAt: new Date(),
     });
     const res = await request(app)
       .post("/stripe/webhook")
@@ -102,7 +102,7 @@ describe("POST /stripe/webhook", () => {
       stripeEventId: "evt_cs_completed",
       type: "checkout.session.completed",
       payload: null,
-      processedAt: new Date(),
+      receivedAt: new Date(),
     });
     vi.mocked(prisma.order.updateMany).mockResolvedValueOnce({ count: 1 });
 
@@ -175,7 +175,7 @@ describe("POST /stripe/webhook", () => {
         stripeEventId: "evt_replay_id",
         type: "checkout.session.completed",
         payload: null,
-        processedAt: new Date(),
+        receivedAt: new Date(),
       })
       .mockRejectedValueOnce({ code: "P2002" })
       .mockRejectedValueOnce({ code: "P2002" })
@@ -222,7 +222,7 @@ describe("POST /stripe/webhook", () => {
       stripeEventId: "evt_orphan",
       type: "checkout.session.completed",
       payload: null,
-      processedAt: new Date(),
+      receivedAt: new Date(),
     });
 
     const res = await request(app)
@@ -272,7 +272,7 @@ describe("POST /stripe/webhook", () => {
       stripeEventId: "evt_tx",
       type: "checkout.session.completed",
       payload: null,
-      processedAt: new Date(),
+      receivedAt: new Date(),
     });
     vi.mocked(prisma.order.updateMany).mockResolvedValueOnce({ count: 1 });
 
