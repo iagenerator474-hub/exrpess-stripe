@@ -122,6 +122,8 @@ describe("POST /stripe/webhook", () => {
         payload: expect.any(Object),
       },
     });
+    const createCall = vi.mocked(prisma.paymentEvent.create).mock.calls[0][0];
+    expect(createCall.data.payload).not.toHaveProperty("orderId");
     expect(prisma.order.updateMany).toHaveBeenCalledWith({
       where: { id: "order-1", stripeSessionId: "cs_session_123", status: { not: "paid" } },
       data: { status: "paid", paidAt: expect.any(Date) },

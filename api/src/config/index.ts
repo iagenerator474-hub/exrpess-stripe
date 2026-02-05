@@ -41,6 +41,13 @@ const envSchema = z.object({
     .string()
     .optional()
     .transform((v) => v === "1" || v === "true"),
+  LOG_STACK_IN_PROD: z
+    .union([z.string(), z.boolean()])
+    .optional()
+    .transform((v) => v === true || v === "true" || v === "1")
+    .default(false),
+  PAYMENT_EVENT_RETENTION_MODE: z.enum(["retain", "erase"]).default("retain"),
+  PAYMENT_EVENT_RETENTION_DAYS: z.coerce.number().min(1).max(365 * 10).default(365),
 });
 
 export type Config = z.infer<typeof envSchema>;

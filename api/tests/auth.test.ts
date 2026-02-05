@@ -95,7 +95,7 @@ describe("Auth", () => {
     it("returns 401 with token signed with wrong issuer", async () => {
       const { config } = await import("../src/config/index.js");
       const token = jwt.sign(
-        { sub: "user-1", email: "me@example.com", role: "user" },
+        { sub: "user-1", role: "user" },
         config.JWT_ACCESS_SECRET,
         { expiresIn: "15m", issuer: "wrong-issuer" }
       );
@@ -106,12 +106,12 @@ describe("Auth", () => {
       expect(res.body.error).toMatch(/invalid|expired|token/i);
     });
 
-    it("returns 200 with valid token and user from DB", async () => {
+    it("returns 200 with valid token and user from DB (email from DB, not JWT)", async () => {
       const { config } = await import("../src/config/index.js");
       const opts: jwt.SignOptions = { expiresIn: "15m", issuer: config.JWT_ISSUER };
       if (config.JWT_AUDIENCE) opts.audience = config.JWT_AUDIENCE;
       const token = jwt.sign(
-        { sub: "user-1", email: "me@example.com", role: "user" },
+        { sub: "user-1", role: "user" },
         config.JWT_ACCESS_SECRET,
         opts
       );
@@ -125,6 +125,16 @@ describe("Auth", () => {
       expect(res.body).toHaveProperty("user");
       expect(res.body.user).toMatchObject({ email: "me@example.com", role: "user" });
       expect(res.body.user).toHaveProperty("id");
+    });
+
+    it("JWT payload does not contain email (RGPD)", async () => {
+      const { generateAccessToken } = await import("../src/modules/auth/token.service.js");
+      const token = generateAccessToken({ sub: "user-1", role: "user" });
+      const decoded = jwt.decode(token) as Record<string, unknown> | null;
+      expect(decoded).not.toBeNull();
+      expect(decoded).not.toHaveProperty("email");
+      expect(decoded).toHaveProperty("sub", "user-1");
+      expect(decoded).toHaveProperty("role", "user");
     });
   });
 

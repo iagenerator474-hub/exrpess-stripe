@@ -4,11 +4,8 @@ import { config } from "../../config/index.js";
 
 const REFRESH_TOKEN_BYTES = 32;
 
-export function generateAccessToken(payload: {
-  sub: string;
-  email: string;
-  role: string;
-}): string {
+/** JWT payload: sub + role only (RGPD: no email in token; /me returns email from DB). */
+export function generateAccessToken(payload: { sub: string; role: string }): string {
   const options: jwt.SignOptions = {
     expiresIn: config.JWT_ACCESS_EXPIRES_IN as jwt.SignOptions["expiresIn"],
     issuer: config.JWT_ISSUER,

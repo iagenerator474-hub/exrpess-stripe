@@ -34,11 +34,10 @@ router.post(
         throw new AppError(msg, 400, "VALIDATION_ERROR");
       }
 
-      const { amount, currency } = parsed.data;
+      const { productId } = parsed.data;
       const result = await checkoutService.createCheckoutSession({
         userId,
-        amountCents: amount,
-        currency,
+        productId,
       });
 
       res.status(200).json(result);

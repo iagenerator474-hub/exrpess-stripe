@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
 import { logger } from "../lib/logger.js";
+import { config } from "../config/index.js";
 
 export class AppError extends Error {
   constructor(
@@ -10,6 +11,12 @@ export class AppError extends Error {
     super(message);
     this.name = "AppError";
   }
+}
+
+/** Log stack only in dev, or in prod when LOG_STACK_IN_PROD and 500 non-AppError. Never log headers/cookies/body. */
+function shouldLogStack(statusCode: number, isAppError: boolean): boolean {
+  if (config.NODE_ENV !== "production") return true;
+  return config.LOG_STACK_IN_PROD === true && statusCode === 500 && !isAppError;
 }
 
 export function errorHandler(
@@ -28,16 +35,14 @@ export function errorHandler(
       ? err.message
       : "Internal server error";
 
-  // Always log server-side: message, stack, requestId, route (prod-safe)
   logger.error(serverMessage, {
     requestId,
     statusCode,
     method: req.method,
     path: req.path,
-    ...(err instanceof Error && { stack: err.stack }),
+    ...(err instanceof Error && shouldLogStack(statusCode, isAppError) && { stack: err.stack }),
   });
 
-  // Client: AppError => expose message; non-AppError => prod = generic 500 only
   const clientMessage =
     isAppError || process.env.NODE_ENV === "development"
       ? serverMessage
@@ -47,6 +52,7 @@ export function errorHandler(
     error: clientMessage,
     ...(requestId && { requestId }),
     ...(statusCode === 404 && { path: req.method + " " + req.originalUrl }),
+    ...(isAppError && err.code && { code: err.code }),
     ...(process.env.NODE_ENV === "development" && err instanceof Error && { stack: err.stack }),
   };
   res.status(statusCode).json(body);

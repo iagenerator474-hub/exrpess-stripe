@@ -167,12 +167,32 @@ paths:
         "401":
           description: Unauthorized
 
+  /products:
+    get:
+      summary: List active products (server-priced; use productId for checkout)
+      operationId: listProducts
+      tags: [Products]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    name: { type: string }
+                    amountCents: { type: integer }
+                    currency: { type: string }
+
   /payments/checkout-session:
     post:
       summary: Create Stripe Checkout session
       operationId: createCheckoutSession
       tags: [Payments]
-      description: Protected by Bearer JWT. Creates an order and a Stripe Checkout session; client redirects user to checkoutUrl.
+      description: Protected by Bearer JWT. Server-priced via productId only (no client amount/currency). Creates an order and a Stripe Checkout session; client redirects user to checkoutUrl.
       security:
         - bearerAuth: []
       requestBody:
@@ -180,10 +200,9 @@ paths:
           application/json:
             schema:
               type: object
-              required: [amount]
+              required: [productId]
               properties:
-                amount: { type: integer, description: Amount in cents }
-                currency: { type: string, default: eur }
+                productId: { type: string, description: Product id from GET /products }
       responses:
         "200":
           description: OK

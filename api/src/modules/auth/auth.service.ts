@@ -61,7 +61,6 @@ export async function login(input: LoginInput): Promise<LoginResult> {
   }
   const accessToken = generateAccessToken({
     sub: user.id,
-    email: user.email,
     role: user.role,
   });
   const { refreshTokenValue, expiresAt: refreshExpiresAt } =

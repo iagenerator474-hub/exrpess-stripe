@@ -8,6 +8,7 @@ import { config } from "../src/config/index.js";
 vi.mock("../src/modules/stripe/stripe.service.js");
 vi.mock("../src/lib/prisma.js", () => ({
   prisma: {
+    product: { findUnique: vi.fn() },
     order: {
       create: vi.fn(),
       update: vi.fn(),
@@ -21,7 +22,7 @@ function validToken() {
   const opts: jwt.SignOptions = { expiresIn: "15m", issuer: config.JWT_ISSUER };
   if (config.JWT_AUDIENCE) opts.audience = config.JWT_AUDIENCE;
   return jwt.sign(
-    { sub: "user-1", userId: "user-1", email: "u@example.com", role: "user" },
+    { sub: "user-1", userId: "user-1", role: "user" },
     config.JWT_ACCESS_SECRET,
     opts
   );
@@ -29,6 +30,7 @@ function validToken() {
 
 describe("POST /payments/checkout-session", () => {
   beforeEach(() => {
+    vi.mocked(prisma.product.findUnique).mockReset();
     vi.mocked(prisma.order.create).mockReset();
     vi.mocked(prisma.order.update).mockReset();
     vi.mocked(stripeService.createCheckoutSession).mockReset();
@@ -37,28 +39,51 @@ describe("POST /payments/checkout-session", () => {
   it("returns 401 without auth", async () => {
     const res = await request(app)
       .post("/payments/checkout-session")
-      .send({ amount: 1000, currency: "eur" });
+      .send({ productId: "prod-1" });
     expect(res.status).toBe(401);
   });
 
-  it("returns 400 on invalid input", async () => {
+  it("returns 400 when body has amount/currency instead of productId (anti-tampering)", async () => {
     const res = await request(app)
       .post("/payments/checkout-session")
       .set("Authorization", `Bearer ${validToken()}`)
-      .send({ amount: -1, currency: "eur" });
+      .send({ amount: 1000, currency: "eur" });
     expect(res.status).toBe(400);
     expect(res.body).toHaveProperty("error");
   });
 
-  it("returns 400 on invalid currency", async () => {
+  it("returns 400 on invalid productId (INVALID_PRODUCT)", async () => {
+    vi.mocked(prisma.product.findUnique).mockResolvedValueOnce(null);
     const res = await request(app)
       .post("/payments/checkout-session")
       .set("Authorization", `Bearer ${validToken()}`)
-      .send({ amount: 1000, currency: "xyz" });
+      .send({ productId: "invalid-id" });
     expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ error: "Invalid product", code: "INVALID_PRODUCT" });
   });
 
-  it("creates Order and returns checkoutUrl when Stripe succeeds", async () => {
+  it("returns 400 when product is inactive", async () => {
+    vi.mocked(prisma.product.findUnique).mockResolvedValueOnce({
+      id: "prod-1",
+      amountCents: 1000,
+      currency: "eur",
+      active: false,
+    });
+    const res = await request(app)
+      .post("/payments/checkout-session")
+      .set("Authorization", `Bearer ${validToken()}`)
+      .send({ productId: "prod-1" });
+    expect(res.status).toBe(400);
+    expect(res.body).toHaveProperty("error", "Invalid product");
+  });
+
+  it("creates Order from product price and returns checkoutUrl when Stripe succeeds", async () => {
+    vi.mocked(prisma.product.findUnique).mockResolvedValueOnce({
+      id: "prod-1",
+      amountCents: 1000,
+      currency: "eur",
+      active: true,
+    });
     vi.mocked(prisma.order.create).mockResolvedValueOnce({
       id: "order-1",
       userId: "user-1",
@@ -66,6 +91,7 @@ describe("POST /payments/checkout-session", () => {
       amountCents: 1000,
       currency: "eur",
       status: "pending",
+      paidAt: null,
       createdAt: new Date(),
       updatedAt: new Date(),
     });
@@ -80,6 +106,7 @@ describe("POST /payments/checkout-session", () => {
       amountCents: 1000,
       currency: "eur",
       status: "pending",
+      paidAt: null,
       createdAt: new Date(),
       updatedAt: new Date(),
     });
@@ -87,13 +114,17 @@ describe("POST /payments/checkout-session", () => {
     const res = await request(app)
       .post("/payments/checkout-session")
       .set("Authorization", `Bearer ${validToken()}`)
-      .send({ amount: 1000, currency: "eur" });
+      .send({ productId: "prod-1" });
 
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({
       checkoutUrl: "https://checkout.stripe.com/session-123",
       stripeSessionId: "cs_123",
       orderId: "order-1",
+    });
+    expect(prisma.product.findUnique).toHaveBeenCalledWith({
+      where: { id: "prod-1" },
+      select: { id: true, amountCents: true, currency: true, active: true },
     });
     expect(prisma.order.create).toHaveBeenCalledWith({
       data: {
@@ -110,6 +141,12 @@ describe("POST /payments/checkout-session", () => {
   });
 
   it("marks Order as failed when Stripe fails", async () => {
+    vi.mocked(prisma.product.findUnique).mockResolvedValueOnce({
+      id: "prod-2",
+      amountCents: 500,
+      currency: "eur",
+      active: true,
+    });
     vi.mocked(prisma.order.create).mockResolvedValueOnce({
       id: "order-2",
       userId: "user-1",
@@ -117,25 +154,17 @@ describe("POST /payments/checkout-session", () => {
       amountCents: 500,
       currency: "eur",
       status: "pending",
+      paidAt: null,
       createdAt: new Date(),
       updatedAt: new Date(),
     });
     vi.mocked(stripeService.createCheckoutSession).mockRejectedValueOnce(new Error("Stripe API error"));
-    vi.mocked(prisma.order.update).mockResolvedValueOnce({
-      id: "order-2",
-      userId: "user-1",
-      stripeSessionId: null,
-      amountCents: 500,
-      currency: "eur",
-      status: "failed",
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    });
+    vi.mocked(prisma.order.update).mockResolvedValueOnce({} as never);
 
     const res = await request(app)
       .post("/payments/checkout-session")
       .set("Authorization", `Bearer ${validToken()}`)
-      .send({ amount: 500, currency: "eur" });
+      .send({ productId: "prod-2" });
 
     expect(res.status).toBe(502);
     expect(prisma.order.update).toHaveBeenCalledWith({

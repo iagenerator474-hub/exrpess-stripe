@@ -15,13 +15,12 @@ export function verifyWebhookEvent(
   return stripe.webhooks.constructEvent(rawBody, signature, webhookSecret);
 }
 
-/** Minimal payload for ledger: ids only, no secrets. */
+/** Minimal payload for ledger (RGPD): no orderId in payload; orderId stored only in column. */
 function minimalPayload(event: Stripe.Event): Record<string, unknown> {
-  const obj = event.data?.object as { id?: string; metadata?: { orderId?: string }; client_reference_id?: string } | undefined;
+  const obj = event.data?.object as { id?: string } | undefined;
   return {
     type: event.type,
     stripeEventId: event.id,
-    orderId: obj?.metadata?.orderId ?? obj?.client_reference_id ?? undefined,
     stripeSessionId: obj?.id ?? undefined,
   };
 }
@@ -72,8 +71,10 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
       const orderIdFromEvent = session.metadata?.orderId ?? session.client_reference_id ?? null;
       const sessionId = session.id;
 
-      const payloadSnapshot = {
-        ...payload,
+      const payloadSnapshot: Record<string, unknown> = {
+        stripeEventId: event.id,
+        stripeSessionId: sessionId,
+        type: event.type,
         amount_total: session.amount_total ?? undefined,
         currency: session.currency ?? undefined,
         payment_status: session.payment_status ?? undefined,

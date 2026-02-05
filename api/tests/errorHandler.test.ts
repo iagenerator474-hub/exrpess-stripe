@@ -23,7 +23,7 @@ describe("Error handler", () => {
     );
     const { config } = await import("../src/config/index.js");
     const token = jwt.sign(
-      { sub: "user-1", email: "u@example.com", role: "user" },
+      { sub: "user-1", role: "user" },
       config.JWT_ACCESS_SECRET,
       { expiresIn: "15m", issuer: config.JWT_ISSUER }
     );
@@ -40,7 +40,7 @@ describe("Error handler", () => {
     process.env.NODE_ENV = "production";
     const { config } = await import("../src/config/index.js");
     const token = jwt.sign(
-      { sub: "user-1", email: "u@example.com", role: "user" },
+      { sub: "user-1", role: "user" },
       config.JWT_ACCESS_SECRET,
       { expiresIn: "15m", issuer: config.JWT_ISSUER }
     );
@@ -51,5 +51,24 @@ describe("Error handler", () => {
     expect(res.status).toBe(500);
     expect(res.body.error).toBe("Internal server error");
     expect(res.body.error).not.toMatch(/leak|secret/i);
+    expect(res.body).not.toHaveProperty("stack");
+  });
+
+  it("in production, 500 response body does not contain stack (prod-safe logs)", async () => {
+    vi.mocked(authService.getMe).mockRejectedValueOnce(new Error("Unexpected"));
+    const prev = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    const { config } = await import("../src/config/index.js");
+    const token = jwt.sign(
+      { sub: "user-1", role: "user" },
+      config.JWT_ACCESS_SECRET,
+      { expiresIn: "15m", issuer: config.JWT_ISSUER }
+    );
+    const res = await request(app)
+      .get("/auth/me")
+      .set("Authorization", `Bearer ${token}`);
+    process.env.NODE_ENV = prev;
+    expect(res.status).toBe(500);
+    expect(res.body).not.toHaveProperty("stack");
   });
 });

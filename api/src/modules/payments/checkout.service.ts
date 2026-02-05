@@ -5,8 +5,7 @@ import { AppError } from "../../middleware/errorHandler.js";
 
 export interface CreateCheckoutSessionInput {
   userId: string;
-  amountCents: number;
-  currency: string;
+  productId: string;
 }
 
 export interface CreateCheckoutSessionResult {
@@ -18,11 +17,19 @@ export interface CreateCheckoutSessionResult {
 export async function createCheckoutSession(
   input: CreateCheckoutSessionInput
 ): Promise<CreateCheckoutSessionResult> {
+  const product = await prisma.product.findUnique({
+    where: { id: input.productId },
+    select: { id: true, amountCents: true, currency: true, active: true },
+  });
+  if (!product || !product.active) {
+    throw new AppError("Invalid product", 400, "INVALID_PRODUCT");
+  }
+
   const order = await prisma.order.create({
     data: {
       userId: input.userId,
-      amountCents: input.amountCents,
-      currency: input.currency,
+      amountCents: product.amountCents,
+      currency: product.currency,
       status: "pending",
     },
   });
@@ -30,8 +37,8 @@ export async function createCheckoutSession(
   try {
     const session = await stripeService.createCheckoutSession({
       orderId: order.id,
-      amountCents: input.amountCents,
-      currency: input.currency,
+      amountCents: product.amountCents,
+      currency: product.currency,
     });
 
     await prisma.order.update({

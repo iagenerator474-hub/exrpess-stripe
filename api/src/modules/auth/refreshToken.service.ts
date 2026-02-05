@@ -131,7 +131,6 @@ export async function rotate(tokenValue: string): Promise<RotateResult> {
 
   const accessToken = generateAccessToken({
     sub: user.id,
-    email: user.email,
     role: user.role,
   });
   return {

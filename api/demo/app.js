@@ -127,34 +127,50 @@ async function fetchMe() {
   }
 }
 
+async function loadProducts() {
+  const select = document.getElementById('checkout-product');
+  if (!select) return;
+  try {
+    const res = await fetch(API_BASE + '/products');
+    const products = await res.json().catch(() => []);
+    if (!res.ok || !Array.isArray(products)) {
+      select.innerHTML = '<option value="">Aucun produit</option>';
+      return;
+    }
+    select.innerHTML = products.map(function (p) {
+      return '<option value="' + p.id + '">' + (p.name || p.id) + ' – ' + (p.amountCents / 100).toFixed(2) + ' ' + (p.currency || 'eur') + '</option>';
+    }).join('');
+  } catch (e) {
+    select.innerHTML = '<option value="">Erreur chargement</option>';
+  }
+}
+
 async function createCheckoutSession() {
-  const amountEl = document.getElementById('checkout-amount');
-  const currencyEl = document.getElementById('checkout-currency');
-  if (!amountEl || !currencyEl) {
-    log('Checkout: champs introuvables', true);
+  const productEl = document.getElementById('checkout-product');
+  if (!productEl) {
+    log('Checkout: select produit introuvable', true);
     return;
   }
-  const amount = parseInt(amountEl.value, 10);
-  const currency = (currencyEl.value && currencyEl.value.trim().toLowerCase()) || 'eur';
-  if (!amount || amount < 1) {
-    log('Checkout: amount (cents) requis et > 0', true);
+  const productId = (productEl.value && productEl.value.trim()) || '';
+  if (!productId) {
+    log('Checkout: choisir un produit', true);
     return;
   }
   log('Création session checkout...');
   try {
     const res = await fetchWithAuth('/payments/checkout-session', {
       method: 'POST',
-      body: JSON.stringify({ amount, currency }),
+      body: JSON.stringify({ productId }),
     });
     const data = await res.json().catch(() => ({}));
     if (res.ok && data.checkoutUrl) {
-      log(`Checkout OK: ${data.orderId} -> redirection`);
+      log('Checkout OK: ' + data.orderId + ' -> redirection');
       window.location.href = data.checkoutUrl;
     } else {
-      log(`Checkout ${res.status}: ${data.error || res.statusText}`, true);
+      log('Checkout ' + res.status + ': ' + (data.error || res.statusText), true);
     }
   } catch (e) {
-    log(`Checkout error: ${e.message}`, true);
+    log('Checkout error: ' + e.message, true);
   }
 }
 
@@ -188,6 +204,7 @@ function init() {
       createCheckoutSession();
     });
   }
+  loadProducts();
   if (!API_BASE) {
     log('Ouvrez cette page via http://localhost:3000/demo (pas en ouvrant le fichier directement).', true);
   } else {

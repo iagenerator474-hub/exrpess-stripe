@@ -21,6 +21,7 @@ function isLocalhostOrigin(origin: string): boolean {
 }
 import { healthRoutes } from "./modules/health/health.routes.js";
 import { authRoutes } from "./modules/auth/auth.routes.js";
+import { productsRoutes } from "./modules/products/products.routes.js";
 import { paymentsRoutes } from "./modules/payments/payments.routes.js";
 import { stripeWebhookRoutes } from "./modules/stripe/stripe.routes.js";
 
@@ -91,6 +92,7 @@ app.use(express.json({ limit: "100kb" }));
 app.use(cookieParser());
 
 app.use("/auth", authLimiter, authRoutes);
+app.use("/products", productsRoutes);
 app.use("/payments", paymentsRoutes);
 app.use(healthRoutes);
 

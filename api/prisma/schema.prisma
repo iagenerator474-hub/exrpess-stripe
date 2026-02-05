@@ -51,13 +51,23 @@ model Order {
   paymentEvents PaymentEvent[]
 }
 
+model Product {
+  id          String   @id @default(cuid())
+  name        String
+  amountCents Int      @map("amount_cents")
+  currency    String   @default("eur")
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+}
+
 model PaymentEvent {
   id            String   @id @default(cuid())
   orderId       String?  @map("order_id") // null when order missing (orphaned event)
   orphaned      Boolean  @default(false) @map("orphaned") // true when orderId null / order not found
   stripeEventId String   @unique @map("stripe_event_id") // idempotency key
   type          String   // e.g. checkout.session.completed, payment_intent.succeeded
-  payload       Json?    // raw or relevant payload snapshot
+  payload       Json?    // minimal snapshot (no orderId; RGPD)
   receivedAt    DateTime @default(now()) @map("received_at") // when event was persisted (webhook receipt)
 
   order Order? @relation(fields: [orderId], references: [id], onDelete: SetNull)

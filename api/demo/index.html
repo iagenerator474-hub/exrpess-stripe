@@ -37,13 +37,8 @@
     <section>
       <h2>Create checkout session</h2>
       <form id="form-checkout">
-        <input type="number" id="checkout-amount" placeholder="Amount (cents)" value="1000" min="1" required>
-        <input type="text" id="checkout-currency" placeholder="Currency" value="eur" list="currencies">
-        <datalist id="currencies">
-          <option value="eur">
-          <option value="usd">
-          <option value="gbp">
-        </datalist>
+        <label for="checkout-product">Produit (prix serveur)</label>
+        <select id="checkout-product" required></select>
         <button type="submit">Payer (Stripe Checkout)</button>
       </form>
     </section>
