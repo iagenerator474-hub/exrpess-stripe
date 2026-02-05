@@ -43,17 +43,39 @@ export function errorHandler(
     ...(err instanceof Error && shouldLogStack(statusCode, isAppError) && { stack: err.stack }),
   });
 
-  const clientMessage =
-    isAppError || process.env.NODE_ENV === "development"
-      ? serverMessage
-      : "Internal server error";
+  const isProduction = process.env.NODE_ENV === "production";
+  let clientMessage: string;
+  let body: Record<string, unknown>;
 
-  const body: Record<string, unknown> = {
-    error: clientMessage,
-    ...(requestId && { requestId }),
-    ...(statusCode === 404 && { path: req.method + " " + req.originalUrl }),
-    ...(isAppError && err.code && { code: err.code }),
-    ...(process.env.NODE_ENV === "development" && err instanceof Error && { stack: err.stack }),
-  };
+  if (isProduction) {
+    if (isAppError && err.statusCode < 500) {
+      clientMessage = err.message;
+      body = {
+        error: clientMessage,
+        ...(requestId && { requestId }),
+        ...(statusCode === 404 && { path: req.method + " " + req.originalUrl }),
+        ...(err.code && { code: err.code }),
+      };
+    } else {
+      clientMessage = "Internal server error";
+      body = {
+        error: clientMessage,
+        ...(requestId && { requestId }),
+      };
+    }
+  } else {
+    clientMessage =
+      isAppError || process.env.NODE_ENV === "development"
+        ? serverMessage
+        : "Internal server error";
+    body = {
+      error: clientMessage,
+      ...(requestId && { requestId }),
+      ...(statusCode === 404 && { path: req.method + " " + req.originalUrl }),
+      ...(isAppError && err.code && { code: err.code }),
+      ...(err instanceof Error && { stack: err.stack }),
+    };
+  }
+
   res.status(statusCode).json(body);
 }

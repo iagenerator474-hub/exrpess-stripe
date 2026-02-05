@@ -22,8 +22,17 @@
 ## Privacy & retention
 
 - [ ] **Logs** : rétention recommandée 14–30 jours (à configurer côté hébergeur ou centralisation logs). Ne pas logger headers/cookies/body.
-- [ ] **PaymentEvent** : rétention par défaut 365 jours (mode `retain`) pour audit paiement. Script `npm run purge:payment-events` en mode retain supprime les events plus vieux que `PAYMENT_EVENT_RETENTION_DAYS`. En mode `erase`, le script peut purger par userId (pour droit à l’effacement).
+- [ ] **PaymentEvent** : rétention par défaut 365 jours (mode `retain`) pour audit paiement. Script `npm run purge:payment-events` en mode retain supprime les events plus vieux que `PAYMENT_EVENT_RETENTION_DAYS`. En mode `erase`, le script peut purger par userId (pour droit à l’effacement). Voir section **Purge PaymentEvents** ci-dessous.
 - [ ] **Droit à l’effacement** : supprimer un utilisateur implique de décider quoi faire des Order et PaymentEvent liés. Les PaymentEvent peuvent être purgés par userId (script erase). Les Order peuvent être anonymisées ou supprimées selon la politique métier. Documenter ce qui est supprimé vs conservé et pourquoi (ex. conservation pour preuve de paiement / comptabilité).
+
+## Purge PaymentEvents
+
+- **Retain** (par âge) : supprime les PaymentEvent plus vieux que `PAYMENT_EVENT_RETENTION_DAYS`.
+  - Commande : `npm run purge:payment-events` ou `npx tsx src/scripts/purgePaymentEvents.ts retain`
+- **Erase** (par utilisateur) : supprime les PaymentEvent liés aux commandes d’un utilisateur (droit à l’effacement). Destiné à un flux admin sécurisé, **non exposé publiquement**.
+  - **Obligatoire** : définir `PURGE_CONFIRM=YES` dans l’environnement pour confirmer l’action (sécurité “freelance-safe”).
+  - Commande : `PURGE_CONFIRM=YES npx tsx src/scripts/purgePaymentEvents.ts erase <userId>`
+  - Exemple : `PURGE_CONFIRM=YES npm run purge:payment-events -- erase user_abc123`
 
 ## Déploiement
 

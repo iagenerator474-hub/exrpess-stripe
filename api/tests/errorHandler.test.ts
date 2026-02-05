@@ -71,4 +71,26 @@ describe("Error handler", () => {
     expect(res.status).toBe(500);
     expect(res.body).not.toHaveProperty("stack");
   });
+
+  it("AppError 500 does not leak message/code in production", async () => {
+    vi.mocked(authService.getMe).mockRejectedValueOnce(
+      new AppError("DB failed", 500, "DB_ERROR")
+    );
+    const prev = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    const { config } = await import("../src/config/index.js");
+    const token = jwt.sign(
+      { sub: "user-1", role: "user" },
+      config.JWT_ACCESS_SECRET,
+      { expiresIn: "15m", issuer: config.JWT_ISSUER }
+    );
+    const res = await request(app)
+      .get("/auth/me")
+      .set("Authorization", `Bearer ${token}`);
+    process.env.NODE_ENV = prev;
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe("Internal server error");
+    expect(res.body).not.toHaveProperty("code");
+    expect(res.body).not.toHaveProperty("stack");
+  });
 });

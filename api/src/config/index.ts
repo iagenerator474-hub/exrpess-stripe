@@ -3,6 +3,29 @@ import { z } from "zod";
 
 const DEFAULT_STRIPE_API_VERSION = "2025-02-24.acacia";
 
+/** Reusable boolean env: true only for true / "true" / "1". Accepts string or boolean (test stability). */
+export const envBool = z
+  .union([z.string(), z.boolean()])
+  .transform((v) => v === true || v === "true" || v === "1");
+
+/** Optional boolean env; undefined when absent. */
+const envBoolOptional = z
+  .union([z.string(), z.boolean()])
+  .optional()
+  .transform((v) =>
+    v === undefined ? undefined : v === true || v === "true" || v === "1"
+  );
+
+/** Optional boolean env with default. */
+const envBoolDefault = (d: boolean) =>
+  z
+    .union([z.string(), z.boolean()])
+    .optional()
+    .transform((v) =>
+      v === undefined ? d : v === true || v === "true" || v === "1"
+    )
+    .default(d);
+
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().default(3000),
@@ -10,10 +33,7 @@ const envSchema = z.object({
   JWT_ACCESS_SECRET: z.string().min(16),
   JWT_ACCESS_EXPIRES_IN: z.string().default("15m"),
   REFRESH_TOKEN_TTL_DAYS: z.coerce.number().min(1).max(365).default(30),
-  COOKIE_SECURE: z
-    .string()
-    .optional()
-    .transform((v) => v === "true" || v === "1"),
+  COOKIE_SECURE: envBoolOptional,
   COOKIE_SAMESITE: z.enum(["lax", "none", "strict"]).default("lax"),
   COOKIE_DOMAIN: z.string().optional(),
   STRIPE_SECRET_KEY: z.string().startsWith("sk_"),
@@ -25,10 +45,7 @@ const envSchema = z.object({
   CORS_ORIGINS: z.string().default("*"),
   JWT_ISSUER: z.string().min(1).default("express-stripe-auth"),
   JWT_AUDIENCE: z.string().min(1).optional(),
-  TRUST_PROXY: z
-    .string()
-    .optional()
-    .transform((v) => v === "1" || v === "true"),
+  TRUST_PROXY: envBoolOptional,
   RATE_LIMIT_AUTH_WINDOW_MS: z.coerce.number().default(15 * 60 * 1000),
   RATE_LIMIT_AUTH_MAX: z.coerce.number().default(10),
   RATE_LIMIT_REFRESH_WINDOW_MS: z.coerce.number().default(15 * 60 * 1000),
@@ -37,15 +54,8 @@ const envSchema = z.object({
   RATE_LIMIT_WEBHOOK_MAX: z.coerce.number().default(100),
   RATE_LIMIT_CHECKOUT_WINDOW_MS: z.coerce.number().default(60 * 1000),
   RATE_LIMIT_CHECKOUT_MAX: z.coerce.number().default(30),
-  ENABLE_DEMO: z
-    .string()
-    .optional()
-    .transform((v) => v === "1" || v === "true"),
-  LOG_STACK_IN_PROD: z
-    .union([z.string(), z.boolean()])
-    .optional()
-    .transform((v) => v === true || v === "true" || v === "1")
-    .default(false),
+  ENABLE_DEMO: envBoolOptional,
+  LOG_STACK_IN_PROD: envBoolDefault(false),
   PAYMENT_EVENT_RETENTION_MODE: z.enum(["retain", "erase"]).default("retain"),
   PAYMENT_EVENT_RETENTION_DAYS: z.coerce.number().min(1).max(365 * 10).default(365),
 });
