@@ -60,5 +60,5 @@ model PaymentEvent {
   payload       Json?    // raw or relevant payload snapshot
   processedAt   DateTime @default(now()) @map("processed_at")
 
-  order Order? @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order Order? @relation(fields: [orderId], references: [id], onDelete: SetNull)
 }

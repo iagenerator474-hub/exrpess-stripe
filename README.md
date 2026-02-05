@@ -80,6 +80,11 @@ Voir **`api/.env.example`**. Obligatoires : `DATABASE_URL`, `JWT_ACCESS_SECRET`,
 - **Smoke test** : [SMOKE_TEST.md](SMOKE_TEST.md).
 - **Go-live** : [GO_LIVE_CHECKLIST.md](GO_LIVE_CHECKLIST.md).
 
+## Production validation
+
+Checklist manuelle avant livraison : **[api/PROD_VALIDATION.md](api/PROD_VALIDATION.md)** (migrations, PaymentEvent audit-proof, idempotence webhook, 500 sanitized, rate limit, graceful shutdown).  
+Lancement prod avec Docker : `docker compose up -d` (`.env` avec `NODE_ENV=production`, `CORS_ORIGINS`, et les secrets). Appliquer les migrations : `cd api && npm run db:migrate:deploy`.
+
 ```bash
 cd api && npm test    # tests Vitest (webhook idempotent, refresh, auth guard)
 cd api && npm run lint
