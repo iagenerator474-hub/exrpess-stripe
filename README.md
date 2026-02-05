@@ -88,7 +88,7 @@ cd api && npm run lint
 ## Structure
 
 - **`api/`** — Backend (Express, Prisma, Stripe, auth). Toutes les commandes backend : `cd api && npm run …`.
-- **`demo/`** — Demo HTML servie par l’API à `/demo`.
-- **`frontend/`** — App React/Vite optionnelle (auth + checkout).
+- **`api/demo/`** — Demo HTML minimale servie par l’API à `/demo`.
+- **`frontend/`** — App React/Vite optionnelle (auth + checkout), hors scope backend-first.
 
 `docker compose up` build l’image depuis `api/` et lance l’API + Postgres. Les secrets (JWT, Stripe, `DATABASE_URL`) ne sont **jamais** inclus dans l’image : ils sont fournis au runtime via variables d’environnement (fichier `.env` à la racine ou config plateforme).
