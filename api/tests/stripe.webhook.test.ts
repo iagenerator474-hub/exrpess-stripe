@@ -17,9 +17,10 @@ vi.mock("../src/lib/prisma.js", () => {
   const orderFindUnique = vi.fn();
   const orderUpdateMany = vi.fn();
   const paymentEventCreate = vi.fn();
+  const paymentEventFindUnique = vi.fn();
   const prismaInstance = {
     order: { findUnique: orderFindUnique, updateMany: orderUpdateMany },
-    paymentEvent: { create: paymentEventCreate },
+    paymentEvent: { create: paymentEventCreate, findUnique: paymentEventFindUnique },
   };
   return { prisma: prismaInstance };
 });
@@ -34,15 +35,18 @@ describe("POST /stripe/webhook", () => {
     vi.mocked(prisma.order.findUnique).mockReset();
     vi.mocked(prisma.order.updateMany).mockReset();
     vi.mocked(prisma.paymentEvent.create).mockReset();
+    vi.mocked(prisma.paymentEvent.findUnique).mockReset();
   });
 
-  it("returns 400 when stripe-signature header is missing", async () => {
+  it("returns 400 when stripe-signature header is missing and body includes requestId", async () => {
     const res = await request(app)
       .post("/stripe/webhook")
       .set("Content-Type", "application/json")
       .send(rawBody);
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/signature|Missing/i);
+    expect(res.body).toHaveProperty("requestId");
+    expect(res.headers["x-request-id"]).toBeDefined();
   });
 
   it("returns 400 when signature is invalid", async () => {
@@ -89,12 +93,14 @@ describe("POST /stripe/webhook", () => {
       data: {
         object: {
           id: "cs_session_123",
+          amount_total: 1000,
+          currency: "eur",
           metadata: { orderId: "order-1" },
           client_reference_id: "order-1",
         },
       },
     });
-    vi.mocked(prisma.order.findUnique).mockResolvedValue({ id: "order-1" });
+    vi.mocked(prisma.order.findUnique).mockResolvedValue({ id: "order-1", amountCents: 1000, currency: "eur" });
     vi.mocked(prisma.paymentEvent.create).mockResolvedValueOnce({
       id: "pe-1",
       orderId: "order-1",
@@ -125,8 +131,8 @@ describe("POST /stripe/webhook", () => {
     const createCall = vi.mocked(prisma.paymentEvent.create).mock.calls[0][0];
     expect(createCall.data.payload).not.toHaveProperty("orderId");
     expect(prisma.order.updateMany).toHaveBeenCalledWith({
-      where: { id: "order-1", stripeSessionId: "cs_session_123", status: { not: "paid" } },
-      data: { status: "paid", paidAt: expect.any(Date) },
+      where: { id: "order-1", status: { not: "paid" } },
+      data: { stripeSessionId: "cs_session_123", status: "paid", paidAt: expect.any(Date) },
     });
   });
 
@@ -137,12 +143,14 @@ describe("POST /stripe/webhook", () => {
       data: {
         object: {
           id: "cs_500",
+          amount_total: 1000,
+          currency: "eur",
           metadata: { orderId: "order-1" },
           client_reference_id: "order-1",
         },
       },
     });
-    vi.mocked(prisma.order.findUnique).mockResolvedValue({ id: "order-1" });
+    vi.mocked(prisma.order.findUnique).mockResolvedValue({ id: "order-1", amountCents: 1000, currency: "eur" });
     vi.mocked(prisma.paymentEvent.create).mockRejectedValueOnce(new Error("DB unavailable"));
 
     const res = await request(app)
@@ -151,6 +159,8 @@ describe("POST /stripe/webhook", () => {
       .set("stripe-signature", "v1,valid")
       .send(rawBody);
     expect(res.status).toBe(500);
+    expect(res.body).toHaveProperty("requestId");
+    expect(res.headers["x-request-id"]).toBeDefined();
     expect(prisma.order.updateMany).not.toHaveBeenCalled();
   });
 
@@ -161,13 +171,16 @@ describe("POST /stripe/webhook", () => {
       data: {
         object: {
           id: "cs_replay",
+          amount_total: 1999,
+          currency: "eur",
           metadata: { orderId: "order-replay" },
           client_reference_id: "order-replay",
         },
       },
     };
     constructEventMock.mockReturnValue(sameEvent);
-    vi.mocked(prisma.order.findUnique).mockResolvedValue({ id: "order-replay" });
+    vi.mocked(prisma.order.findUnique).mockResolvedValue({ id: "order-replay", amountCents: 1999, currency: "eur" });
+    vi.mocked(prisma.paymentEvent.findUnique).mockResolvedValue({ orphaned: false });
 
     vi.mocked(prisma.paymentEvent.create)
       .mockResolvedValueOnce({
@@ -197,10 +210,10 @@ describe("POST /stripe/webhook", () => {
     responses.forEach((r) => expect(r.status).toBe(200));
 
     expect(prisma.paymentEvent.create).toHaveBeenCalledTimes(5);
-    expect(prisma.order.updateMany).toHaveBeenCalledTimes(1);
+    expect(prisma.order.updateMany).toHaveBeenCalledTimes(5);
     expect(prisma.order.updateMany).toHaveBeenCalledWith({
-      where: { id: "order-replay", stripeSessionId: "cs_replay", status: { not: "paid" } },
-      data: { status: "paid", paidAt: expect.any(Date) },
+      where: { id: "order-replay", status: { not: "paid" } },
+      data: { stripeSessionId: "cs_replay", status: "paid", paidAt: expect.any(Date) },
     });
   });
 
@@ -254,6 +267,63 @@ describe("POST /stripe/webhook", () => {
     expect(prisma.order.updateMany).not.toHaveBeenCalled();
   });
 
+  it("on amount_total or currency mismatch stores event as orphaned and does not mark order paid", async () => {
+    constructEventMock.mockReturnValueOnce({
+      id: "evt_mismatch",
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: "cs_mismatch",
+          amount_total: 999,
+          currency: "eur",
+          metadata: { orderId: "order-1" },
+          client_reference_id: "order-1",
+        },
+      },
+    });
+    vi.mocked(prisma.order.findUnique).mockResolvedValue({ id: "order-1", amountCents: 1000, currency: "eur" });
+    vi.mocked(prisma.paymentEvent.create).mockResolvedValueOnce({
+      id: "pe-mismatch",
+      orderId: "order-1",
+      orphaned: true,
+      stripeEventId: "evt_mismatch",
+      type: "checkout.session.completed",
+      payload: null,
+      receivedAt: new Date(),
+    });
+
+    const res = await request(app)
+      .post("/stripe/webhook")
+      .set("Content-Type", "application/json")
+      .set("stripe-signature", "v1,mismatch")
+      .send(
+        Buffer.from(
+          JSON.stringify({
+            id: "evt_mismatch",
+            type: "checkout.session.completed",
+            data: {
+              object: {
+                id: "cs_mismatch",
+                amount_total: 999,
+                currency: "eur",
+                metadata: { orderId: "order-1" },
+                client_reference_id: "order-1",
+              },
+            },
+          })
+        )
+      );
+    expect(res.status).toBe(200);
+    expect(prisma.paymentEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        stripeEventId: "evt_mismatch",
+        orderId: "order-1",
+        orphaned: true,
+      }),
+    });
+    expect(prisma.order.updateMany).not.toHaveBeenCalled();
+  });
+
   it("durable: create PaymentEvent then updateMany Order before ACK 200", async () => {
     constructEventMock.mockReturnValueOnce({
       id: "evt_tx",
@@ -261,12 +331,14 @@ describe("POST /stripe/webhook", () => {
       data: {
         object: {
           id: "cs_tx",
+          amount_total: 500,
+          currency: "eur",
           metadata: { orderId: "order-tx" },
           client_reference_id: "order-tx",
         },
       },
     });
-    vi.mocked(prisma.order.findUnique).mockResolvedValue({ id: "order-tx" });
+    vi.mocked(prisma.order.findUnique).mockResolvedValue({ id: "order-tx", amountCents: 500, currency: "eur" });
     vi.mocked(prisma.paymentEvent.create).mockResolvedValueOnce({
       id: "pe-tx",
       orderId: "order-tx",

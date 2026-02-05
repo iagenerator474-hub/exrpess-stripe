@@ -34,21 +34,23 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
   const sig = req.headers["stripe-signature"] as string | undefined;
   const requestId = req.requestId;
 
+  const safeMeta = (meta: Record<string, unknown>) => (requestId ? { ...meta, requestId } : meta);
+
   if (!rawBody || !Buffer.isBuffer(rawBody)) {
-    res.status(400).json({ error: "Missing raw body" });
+    res.status(400).json({ error: "Missing raw body", ...(requestId && { requestId }) });
     return;
   }
 
   if (!sig) {
-    logger.warn("Stripe webhook missing signature", { requestId });
-    res.status(400).json({ error: "Missing stripe-signature header" });
+    logger.warn("Stripe webhook missing signature", safeMeta({}));
+    res.status(400).json({ error: "Missing stripe-signature header", ...(requestId && { requestId }) });
     return;
   }
 
   const webhookSecret = config.STRIPE_WEBHOOK_SECRET;
   if (!webhookSecret) {
     logger.warn("STRIPE_WEBHOOK_SECRET not set");
-    res.status(500).json({ error: "Webhook not configured" });
+    res.status(500).json({ error: "Webhook not configured", ...(requestId && { requestId }) });
     return;
   }
 
@@ -57,8 +59,8 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
     event = verifyWebhookEvent(rawBody, sig, webhookSecret);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Invalid signature";
-    logger.warn("Stripe webhook signature verification failed", { requestId, error: message });
-    res.status(400).json({ error: "Invalid signature" });
+    logger.warn("Stripe webhook signature verification failed", safeMeta({ error: message }));
+    res.status(400).json({ error: "Invalid signature", ...(requestId && { requestId }) });
     return;
   }
 
@@ -84,13 +86,30 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
       let orphaned = !orderIdFromEvent;
 
       if (orderIdFromEvent) {
-        const orderExists = await prisma.order.findUnique({
+        const orderRow = await prisma.order.findUnique({
           where: { id: orderIdFromEvent },
-          select: { id: true },
+          select: { id: true, amountCents: true, currency: true },
         });
-        if (!orderExists) {
+        if (!orderRow) {
           orderId = null;
           orphaned = true;
+        } else {
+          const amountMatch = session.amount_total != null && session.amount_total === orderRow.amountCents;
+          const currencyMatch =
+            (session.currency ?? "").toLowerCase() === (orderRow.currency ?? "").toLowerCase();
+          if (!amountMatch || !currencyMatch) {
+            logger.warn("checkout.session.completed amount/currency mismatch, order not marked paid", {
+              requestId,
+              stripeEventId,
+              stripeSessionId: sessionId,
+              orderId: orderIdFromEvent,
+              sessionAmount: session.amount_total,
+              sessionCurrency: session.currency,
+              orderAmountCents: orderRow.amountCents,
+              orderCurrency: orderRow.currency,
+            });
+            orphaned = true;
+          }
         }
       }
 
@@ -108,22 +127,32 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
         const code = createErr && typeof createErr === "object" && "code" in createErr ? (createErr as { code?: string }).code : undefined;
         if (code === "P2002") {
           logger.info("Stripe webhook duplicate ignored", { requestId, stripeEventId, stripeSessionId: sessionId, orderId: orderIdFromEvent });
+          const existing = await prisma.paymentEvent.findUnique({
+            where: { stripeEventId },
+            select: { orphaned: true },
+          });
+          if (orderIdFromEvent && sessionId && existing && !existing.orphaned) {
+            await prisma.order.updateMany({
+              where: { id: orderIdFromEvent, status: { not: "paid" } },
+              data: { stripeSessionId: sessionId, status: "paid", paidAt: new Date() },
+            });
+          }
           res.status(200).json({ received: true });
           return;
         }
-        logger.error("Webhook persist failed", { requestId, stripeEventId, error: String(createErr) });
-        res.status(500).json({ error: "Internal server error" });
+        if (config.NODE_ENV === "production") {
+          logger.error("Webhook persist failed", { requestId, stripeEventId, errorCode: "persist_failed" });
+        } else {
+          logger.error("Webhook persist failed", { requestId, stripeEventId, error: String(createErr) });
+        }
+        res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
         return;
       }
 
       if (orderIdFromEvent && !orphaned) {
         const updateResult = await prisma.order.updateMany({
-          where: {
-            id: orderIdFromEvent,
-            stripeSessionId: sessionId,
-            status: { not: "paid" },
-          },
-          data: { status: "paid", paidAt: new Date() },
+          where: { id: orderIdFromEvent, status: { not: "paid" } },
+          data: { stripeSessionId: sessionId, status: "paid", paidAt: new Date() },
         });
         logger.info("Stripe webhook outcome", {
           requestId,
@@ -158,8 +187,12 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
           res.status(200).json({ received: true });
           return;
         }
-        logger.error("Webhook persist failed", { requestId, stripeEventId, error: String(createErr) });
-        res.status(500).json({ error: "Internal server error" });
+        if (config.NODE_ENV === "production") {
+          logger.error("Webhook persist failed", { requestId, stripeEventId, errorCode: "persist_failed" });
+        } else {
+          logger.error("Webhook persist failed", { requestId, stripeEventId, error: String(createErr) });
+        }
+        res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
         return;
       }
       logger.info("Stripe webhook event", { requestId, stripeEventId, type: event.type });
@@ -167,7 +200,11 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
 
     res.status(200).json({ received: true });
   } catch (err) {
-    logger.error("Webhook processing failed", { requestId, stripeEventId, error: String(err) });
-    res.status(500).json({ error: "Internal server error" });
+    if (config.NODE_ENV === "production") {
+      logger.error("Webhook processing failed", { requestId, stripeEventId, errorCode: "processing_failed" });
+    } else {
+      logger.error("Webhook processing failed", { requestId, stripeEventId, error: String(err) });
+    }
+    res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
   }
 }

@@ -67,6 +67,13 @@ Si Docker n’est pas disponible (erreur `dockerDesktopLinuxEngine` / « Le fich
 - **Refresh token** : un seul usage ; consommation en transaction (`replacedByTokenId` / `revokedAt`). Double appel = un 200, un 401.
 - **Cookies** : httpOnly, SameSite configurable (`COOKIE_SAMESITE=lax|none|strict`), Secure quand SameSite=none ou en prod.
 
+## Logs & rétention
+
+- **Loggé** : `requestId`, `stripeEventId`, `stripeSessionId`, `orderId` (référence), type d’event, codes d’erreur en prod (`persist_failed`, `processing_failed`). Pas de payload complet ni de body webhook.
+- **Jamais loggé** : secrets (clés Stripe, JWT), headers/cookies/body des requêtes. En prod, le détail des erreurs DB n’est pas loggé (code générique uniquement).
+- **Corrélation** : chaque requête a un `requestId` (UUID) ; envoyé au client via le header `x-request-id` et, pour les erreurs API, dans le body JSON. Permet de relier une requête aux logs.
+- **Rétention** : à configurer côté hébergeur ou centralisation (ex. 14–30 jours). Voir [GO_LIVE_CHECKLIST.md](GO_LIVE_CHECKLIST.md) section Privacy & retention.
+
 ## Env vars
 
 Voir **`api/.env.example`**. Obligatoires : `DATABASE_URL`, `JWT_ACCESS_SECRET`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL`, `CORS_ORIGINS` (prod : liste explicite). Optionnel : `COOKIE_DOMAIN`, `COOKIE_SAMESITE`, `STRIPE_API_VERSION`, `ENABLE_DEMO` (prod).

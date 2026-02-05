@@ -73,6 +73,10 @@ function loadConfig(): Config {
     console.error("CORS_ORIGINS must not be * in production. Set explicit origins.");
     throw new Error("Invalid environment configuration");
   }
+  if (data.NODE_ENV === "production" && data.STRIPE_SECRET_KEY.startsWith("sk_test_")) {
+    console.error("STRIPE_SECRET_KEY must be a live key (sk_live_...) in production.");
+    throw new Error("Invalid environment configuration");
+  }
   return data;
 }
 
