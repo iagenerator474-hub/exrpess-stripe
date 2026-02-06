@@ -9,9 +9,12 @@ vi.mock("../src/modules/stripe/stripe.service.js");
 vi.mock("../src/lib/prisma.js", () => ({
   prisma: {
     product: { findUnique: vi.fn() },
+    user: { findUnique: vi.fn() },
     order: {
       create: vi.fn(),
       update: vi.fn(),
+      findFirst: vi.fn(),
+      updateMany: vi.fn(),
     },
   },
 }));
@@ -31,8 +34,11 @@ function validToken() {
 describe("POST /payments/checkout-session", () => {
   beforeEach(() => {
     vi.mocked(prisma.product.findUnique).mockReset();
+    vi.mocked(prisma.user.findUnique).mockReset();
     vi.mocked(prisma.order.create).mockReset();
     vi.mocked(prisma.order.update).mockReset();
+    vi.mocked(prisma.order.findFirst).mockReset();
+    vi.mocked(prisma.order.updateMany).mockReset();
     vi.mocked(stripeService.createCheckoutSession).mockReset();
   });
 
@@ -83,6 +89,10 @@ describe("POST /payments/checkout-session", () => {
       amountCents: 1000,
       currency: "eur",
       active: true,
+      sellable: true,
+    });
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({
+      email: "user@example.com",
     });
     vi.mocked(prisma.order.create).mockResolvedValueOnce({
       id: "order-1",
@@ -124,11 +134,12 @@ describe("POST /payments/checkout-session", () => {
     });
     expect(prisma.product.findUnique).toHaveBeenCalledWith({
       where: { id: "prod-1" },
-      select: { id: true, amountCents: true, currency: true, active: true },
+      select: { id: true, amountCents: true, currency: true, active: true, sellable: true },
     });
     expect(prisma.order.create).toHaveBeenCalledWith({
       data: {
         userId: "user-1",
+        productId: "prod-1",
         amountCents: 1000,
         currency: "eur",
         status: "pending",
@@ -138,6 +149,57 @@ describe("POST /payments/checkout-session", () => {
       where: { id: "order-1" },
       data: { stripeSessionId: "cs_123" },
     });
+    expect(stripeService.createCheckoutSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orderId: "order-1",
+        amountCents: 1000,
+        currency: "eur",
+        customer_email: "user@example.com",
+      })
+    );
+  });
+
+  it("when user has no email, stripe session is created without customer_email", async () => {
+    vi.mocked(prisma.product.findUnique).mockResolvedValueOnce({
+      id: "prod-no-email",
+      amountCents: 500,
+      currency: "eur",
+      active: true,
+      sellable: true,
+    });
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(null);
+    vi.mocked(prisma.order.create).mockResolvedValueOnce({
+      id: "order-no-email",
+      userId: "user-1",
+      stripeSessionId: null,
+      amountCents: 500,
+      currency: "eur",
+      status: "pending",
+      paidAt: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    vi.mocked(stripeService.createCheckoutSession).mockResolvedValueOnce({
+      url: "https://checkout.stripe.com/session-456",
+      sessionId: "cs_456",
+    });
+    vi.mocked(prisma.order.update).mockResolvedValueOnce({} as never);
+
+    const res = await request(app)
+      .post("/payments/checkout-session")
+      .set("Authorization", `Bearer ${validToken()}`)
+      .send({ productId: "prod-no-email" });
+
+    expect(res.status).toBe(200);
+    expect(stripeService.createCheckoutSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orderId: "order-no-email",
+        amountCents: 500,
+        currency: "eur",
+      })
+    );
+    const call = vi.mocked(stripeService.createCheckoutSession).mock.calls[0][0];
+    expect(call).not.toHaveProperty("customer_email");
   });
 
   it("marks Order as failed when Stripe fails", async () => {
@@ -146,7 +208,9 @@ describe("POST /payments/checkout-session", () => {
       amountCents: 500,
       currency: "eur",
       active: true,
+      sellable: true,
     });
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(null);
     vi.mocked(prisma.order.create).mockResolvedValueOnce({
       id: "order-2",
       userId: "user-1",
@@ -171,5 +235,46 @@ describe("POST /payments/checkout-session", () => {
       where: { id: "order-2" },
       data: { status: "failed" },
     });
+  });
+});
+
+describe("GET /payments/orders/:id", () => {
+  beforeEach(() => {
+    vi.mocked(prisma.product.findUnique).mockReset();
+    vi.mocked(prisma.user.findUnique).mockReset();
+    vi.mocked(prisma.order.create).mockReset();
+    vi.mocked(prisma.order.update).mockReset();
+    vi.mocked(prisma.order.findFirst).mockReset();
+    vi.mocked(prisma.order.updateMany).mockReset();
+  });
+
+  it("prod: success URL / GET order does not set order to paid — only webhook can", async () => {
+    vi.mocked(prisma.order.findFirst).mockResolvedValueOnce({
+      id: "order-pending-1",
+      status: "pending",
+      productId: "prod-1",
+      amountCents: 1000,
+      currency: "eur",
+      stripeSessionId: "cs_123",
+      updatedAt: new Date(),
+    });
+
+    const res = await request(app)
+      .get("/payments/orders/order-pending-1")
+      .set("Authorization", `Bearer ${validToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      id: "order-pending-1",
+      status: "pending",
+      amountCents: 1000,
+      currency: "eur",
+    });
+    expect(prisma.order.findFirst).toHaveBeenCalledWith({
+      where: { id: "order-pending-1", userId: "user-1" },
+      select: expect.any(Object),
+    });
+    expect(prisma.order.update).not.toHaveBeenCalled();
+    expect(prisma.order.updateMany).not.toHaveBeenCalled();
   });
 });

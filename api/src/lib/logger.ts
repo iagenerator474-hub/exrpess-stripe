@@ -1,6 +1,6 @@
 import { config } from "../config/index.js";
 
-/** Rule: never log PII (email, name, etc.) or secrets (tokens, auth headers, request body) in debug or any level. */
+/** Rule: never log PII (email, name, etc.) or secrets (tokens, auth headers, request body). For payment/checkout/webhook use safePaymentLogContext() so logs never include "@" or non-whitelisted keys. */
 type LogLevel = "info" | "warn" | "error" | "debug";
 
 interface LogPayload {

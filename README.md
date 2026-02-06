@@ -60,8 +60,15 @@ Si Docker n’est pas disponible (erreur `dockerDesktopLinuxEngine` / « Le fich
 **Local** : `stripe listen --forward-to http://localhost:3000/stripe/webhook` ; mettre le `whsec_…` dans `.env` (secret local ≠ prod).  
 **Prod** : Dashboard → Webhooks → URL HTTPS, événements `checkout.session.completed` (et `charge.refunded` / `payment_intent.refunded` pour les remboursements). ENABLE_DEMO doit rester false en prod (sinon crash au démarrage). Checklist détaillée : [api/DEPLOYMENT_CHECKLIST.md](api/DEPLOYMENT_CHECKLIST.md). Voir aussi [GO_LIVE_CHECKLIST.md](GO_LIVE_CHECKLIST.md).
 
+**Réconciliation manuelle** : si un webhook a pu être manqué après une longue indisponibilité, lancer le script de réconciliation (usage ops uniquement, pas exposé en route) : `ORDER_ID=order_xxx npx tsx api/src/scripts/reconcileOrder.ts` (ou en passant l’ID en argument). Le script récupère la session Stripe, vérifie `payment_status` / `amount_total`, et met à jour l’Order en `paid` dans une transaction si applicable.
+
 ## Security notes
 
+### Sécurité Stripe
+
+- **Rate limit** : `POST /payments/checkout-session` limité par **IP** (config `RATE_LIMIT_CHECKOUT_*`, défaut 30/min). `POST /stripe/webhook` limité par **IP** avec un seuil élevé (défaut 1000/min) pour ne pas bloquer les retries Stripe ; pas de whitelist d’IP (seuil raisonnable suffit).
+- **Logs** : en cas de dépassement (429), un log sans PII est émis (`Checkout rate limit exceeded` / `Webhook rate limit exceeded`) avec uniquement le `requestId` pour corrélation.
+- **Proxy** : en prod derrière reverse proxy, définir `TRUST_PROXY=1` pour que l’IP client (et donc le rate-limit) soit correcte.
 - **Webhook** : body brut pour la signature ; pas de log du payload complet.
 - **Idempotence** : ledger Stripe (PaymentEvent) + mise à jour Order conditionnelle (`status != 'paid'`).
 - **Refresh token** : un seul usage ; consommation en transaction (`replacedByTokenId` / `revokedAt`). Double appel = un 200, un 401.
@@ -77,6 +84,8 @@ Si Docker n’est pas disponible (erreur `dockerDesktopLinuxEngine` / « Le fich
 ## Env vars
 
 Voir **`api/.env.example`**. Obligatoires : `DATABASE_URL`, `JWT_ACCESS_SECRET` (prod : min 32 car.), `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL`, `CORS_ORIGINS` (prod : liste explicite). Optionnel : `COOKIE_DOMAIN`, `COOKIE_SAMESITE`, `STRIPE_API_VERSION` (doit être alignée avec le Stripe Dashboard), `ENABLE_DEMO` (prod : doit rester false), `HEALTH_EXPOSE_ENV` (défaut false : ne pas renvoyer env dans GET /health).
+
+**STRIPE_PRICING_MODE** : `strict` (défaut) ⇒ `amount_total === order.amountCents` ; `flex` ⇒ `amount_total >= order.amountCents` (autorise taxes/frais). En `flex`, la devise et l’orderId doivent correspondre et le paiement doit être `paid`.
 
 ### Front sur autre domaine (cross-site)
 

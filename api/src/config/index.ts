@@ -34,6 +34,27 @@ const postgresUrlSchema = z
     "DATABASE_URL must be a PostgreSQL URL (postgresql:// or postgres://)"
   );
 
+const stripeSecretKeySchema = z
+  .string({ required_error: "STRIPE_SECRET_KEY is required (Stripe Dashboard → API keys). Use sk_test_ in dev, sk_live_ in production." })
+  .min(1, "STRIPE_SECRET_KEY must not be empty")
+  .refine((s) => s.startsWith("sk_"), "STRIPE_SECRET_KEY must start with sk_ (sk_test_ or sk_live_).");
+
+const stripeWebhookSecretSchema = z
+  .string({
+    required_error:
+      "STRIPE_WEBHOOK_SECRET is required. Get the signing secret from Stripe Dashboard → Webhooks → [your endpoint] → Signing secret (whsec_...).",
+  })
+  .min(1, "STRIPE_WEBHOOK_SECRET must not be empty")
+  .refine((s) => s.startsWith("whsec_"), "STRIPE_WEBHOOK_SECRET must start with whsec_.");
+
+const stripeSuccessUrlSchema = z
+  .string({ required_error: "STRIPE_SUCCESS_URL is required (redirect after successful checkout). Must be a valid URL." })
+  .url("STRIPE_SUCCESS_URL must be a valid URL (e.g. https://app.example.com/success).");
+
+const stripeCancelUrlSchema = z
+  .string({ required_error: "STRIPE_CANCEL_URL is required (redirect when user cancels checkout). Must be a valid URL." })
+  .url("STRIPE_CANCEL_URL must be a valid URL (e.g. https://app.example.com/cancel).");
+
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().default(3000),
@@ -44,12 +65,14 @@ const envSchema = z.object({
   COOKIE_SECURE: envBoolOptional,
   COOKIE_SAMESITE: z.enum(["lax", "none", "strict"]).default("lax"),
   COOKIE_DOMAIN: z.string().optional(),
-  STRIPE_SECRET_KEY: z.string().startsWith("sk_"),
-  STRIPE_SUCCESS_URL: z.string().url(),
-  STRIPE_CANCEL_URL: z.string().url(),
-  STRIPE_WEBHOOK_SECRET: z.string().startsWith("whsec_"),
+  STRIPE_SECRET_KEY: stripeSecretKeySchema,
+  STRIPE_SUCCESS_URL: stripeSuccessUrlSchema,
+  STRIPE_CANCEL_URL: stripeCancelUrlSchema,
+  STRIPE_WEBHOOK_SECRET: stripeWebhookSecretSchema,
   STRIPE_API_VERSION: z.string().min(1).default(DEFAULT_STRIPE_API_VERSION),
   WEBHOOK_BODY_LIMIT: z.string().default("512kb"),
+  /** strict = amount_total must match order.amountCents; flex = allow taxes/shipping (currency + orderId + paid + amount_total >= order.amountCents). */
+  STRIPE_PRICING_MODE: z.enum(["strict", "flex"]).default("strict"),
   CORS_ORIGINS: z.string().default("*"),
   JWT_ISSUER: z.string().min(1).default("express-stripe-auth"),
   JWT_AUDIENCE: z.string().min(1).optional(),
@@ -61,10 +84,13 @@ const envSchema = z.object({
   RATE_LIMIT_REFRESH_WINDOW_MS: z.coerce.number().default(15 * 60 * 1000),
   RATE_LIMIT_REFRESH_MAX: z.coerce.number().default(30),
   /** Webhook rate limit: window (ms). Applied to POST /stripe/webhook. Default 60s. */
+  /** Webhook rate limit: by IP; window (ms). High threshold to avoid blocking Stripe. */
   RATE_LIMIT_WEBHOOK_WINDOW_MS: z.coerce.number().default(60 * 1000),
-  /** Webhook rate limit: max requests per window. Prod: 1000/min recommended; override in .env for dev (e.g. 100). */
+  /** Webhook rate limit: max requests per window per IP. Default 1000/min; override in .env for dev (e.g. 100). */
   RATE_LIMIT_WEBHOOK_MAX: z.coerce.number().default(1000),
+  /** Checkout rate limit: by IP (userId not available at limiter). Window (ms). */
   RATE_LIMIT_CHECKOUT_WINDOW_MS: z.coerce.number().default(60 * 1000),
+  /** Checkout rate limit: max requests per window per IP. */
   RATE_LIMIT_CHECKOUT_MAX: z.coerce.number().default(30),
   ENABLE_DEMO: envBoolOptional,
   HEALTH_EXPOSE_ENV: envBoolDefault(false),
@@ -88,25 +114,26 @@ const WEBHOOK_SECRET_PLACEHOLDERS = [
 function validateStripeWebhookSecretForProd(secret: string): void {
   const s = secret.trim();
   if (!s) {
-    console.error("STRIPE_WEBHOOK_SECRET is required in production and must not be empty.");
-    throw new Error("Invalid environment configuration");
+    const msg = "STRIPE_WEBHOOK_SECRET is required in production and must not be empty.";
+    console.error(msg);
+    throw new Error(msg);
   }
   if (s.length < 6 + WEBHOOK_SECRET_MIN_LENGTH_AFTER_PREFIX) {
-    console.error(
-      `STRIPE_WEBHOOK_SECRET must be at least ${6 + WEBHOOK_SECRET_MIN_LENGTH_AFTER_PREFIX} characters (whsec_ + at least ${WEBHOOK_SECRET_MIN_LENGTH_AFTER_PREFIX} chars).`
-    );
-    throw new Error("Invalid environment configuration");
+    const msg = `STRIPE_WEBHOOK_SECRET must be at least ${6 + WEBHOOK_SECRET_MIN_LENGTH_AFTER_PREFIX} characters (whsec_ + at least ${WEBHOOK_SECRET_MIN_LENGTH_AFTER_PREFIX} chars).`;
+    console.error(msg);
+    throw new Error(msg);
   }
   if (!/^whsec_[A-Za-z0-9]+$/.test(s)) {
-    console.error("STRIPE_WEBHOOK_SECRET must match pattern whsec_<alphanumeric> (no spaces or special chars).");
-    throw new Error("Invalid environment configuration");
+    const msg = "STRIPE_WEBHOOK_SECRET must match pattern whsec_<alphanumeric> (no spaces or special chars).";
+    console.error(msg);
+    throw new Error(msg);
   }
   const lower = s.toLowerCase();
   if (WEBHOOK_SECRET_PLACEHOLDERS.some((p) => lower === p || lower.includes("your_webhook_secret"))) {
-    console.error(
-      "STRIPE_WEBHOOK_SECRET must be the real signing secret from Stripe Dashboard (Webhooks). Placeholder values are not allowed in production."
-    );
-    throw new Error("Invalid environment configuration");
+    const msg =
+      "STRIPE_WEBHOOK_SECRET must be the real signing secret from Stripe Dashboard (Webhooks). Placeholder values are not allowed in production.";
+    console.error(msg);
+    throw new Error(msg);
   }
 }
 
@@ -114,44 +141,61 @@ function validateStripeWebhookSecretForProd(secret: string): void {
 export function validateProductionConfig(data: Config): void {
   if (data.NODE_ENV !== "production") return;
   if (data.CORS_ORIGINS === "*") {
-    console.error("CORS_ORIGINS must not be * in production. Set explicit origins.");
-    throw new Error("Invalid environment configuration");
+    const msg =
+      "CORS_ORIGINS must not be * in production. Set explicit origins (e.g. CORS_ORIGINS=https://app.example.com).";
+    console.error(msg);
+    throw new Error(msg);
   }
   if (data.STRIPE_SECRET_KEY.startsWith("sk_test_")) {
-    console.error("STRIPE_SECRET_KEY must be a live key (sk_live_...) in production.");
-    throw new Error("Invalid environment configuration");
+    const msg = "STRIPE_SECRET_KEY must be a live key (sk_live_...) in production. Use Stripe Dashboard → API keys.";
+    console.error(msg);
+    throw new Error(msg);
   }
   if (data.ENABLE_DEMO === true) {
-    console.error("ENABLE_DEMO must not be true in production. Keep disabled except for explicit demo needs.");
-    throw new Error("Invalid environment configuration");
+    const msg = "ENABLE_DEMO must not be true in production. Keep disabled except for explicit demo needs.";
+    console.error(msg);
+    throw new Error(msg);
   }
   if (data.JWT_ACCESS_SECRET.length < 32) {
-    console.error("JWT_ACCESS_SECRET must be at least 32 characters in production.");
-    throw new Error("Invalid environment configuration");
+    const msg = "JWT_ACCESS_SECRET must be at least 32 characters in production.";
+    console.error(msg);
+    throw new Error(msg);
   }
   const requireTrustProxy = data.REQUIRE_TRUST_PROXY_IN_PROD !== false;
   if (requireTrustProxy && data.TRUST_PROXY !== true) {
-    console.error(
-      "In production, TRUST_PROXY must be set (e.g. TRUST_PROXY=1) when the app is behind a reverse proxy (Nginx, Render, Fly). Set TRUST_PROXY=1 or set REQUIRE_TRUST_PROXY_IN_PROD=false if not behind a proxy."
-    );
-    throw new Error("Invalid environment configuration");
+    const msg =
+      "TRUST_PROXY is required in production when the app is behind a reverse proxy (Nginx, Render, Fly). Set TRUST_PROXY=1, or REQUIRE_TRUST_PROXY_IN_PROD=false if not behind a proxy.";
+    console.error(msg);
+    throw new Error(msg);
   }
   validateStripeWebhookSecretForProd(data.STRIPE_WEBHOOK_SECRET);
   if (!data.STRIPE_SUCCESS_URL.startsWith("https://")) {
-    console.error("STRIPE_SUCCESS_URL must use https:// in production.");
-    throw new Error("Invalid environment configuration");
+    const msg = "STRIPE_SUCCESS_URL must use https:// in production.";
+    console.error(msg);
+    throw new Error(msg);
   }
   if (!data.STRIPE_CANCEL_URL.startsWith("https://")) {
-    console.error("STRIPE_CANCEL_URL must use https:// in production.");
-    throw new Error("Invalid environment configuration");
+    const msg = "STRIPE_CANCEL_URL must use https:// in production.";
+    console.error(msg);
+    throw new Error(msg);
   }
+}
+
+function formatConfigError(parsed: z.SafeParseError<unknown>): string {
+  const flat = parsed.error.flatten();
+  const field = flat.fieldErrors && Object.keys(flat.fieldErrors).length > 0 ? Object.keys(flat.fieldErrors)[0] : null;
+  const msg = field && flat.fieldErrors?.[field]?.[0];
+  if (typeof msg === "string") return `${field}: ${msg}`;
+  return "Invalid environment configuration. Check the variables listed above.";
 }
 
 function loadConfig(): Config {
   const parsed = envSchema.safeParse(process.env);
   if (!parsed.success) {
-    console.error("Invalid environment config:", parsed.error.flatten());
-    throw new Error("Invalid environment configuration");
+    const message = formatConfigError(parsed);
+    console.error("Invalid environment config:", message);
+    console.error("Details:", parsed.error.flatten());
+    throw new Error(message);
   }
   const data = parsed.data;
   validateProductionConfig(data);

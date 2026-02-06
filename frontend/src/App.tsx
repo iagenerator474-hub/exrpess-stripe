@@ -20,7 +20,7 @@ function App() {
             <Route path="/login" element={<Login />} />
             <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
             <Route path="/checkout" element={<ProtectedRoute><Checkout /></ProtectedRoute>} />
-            <Route path="/success" element={<Success />} />
+            <Route path="/success" element={<ProtectedRoute><Success /></ProtectedRoute>} />
             <Route path="/cancel" element={<Cancel />} />
             <Route path="/404" element={<NotFound />} />
             <Route path="*" element={<Navigate to="/404" replace />} />

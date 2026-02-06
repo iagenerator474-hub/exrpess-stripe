@@ -37,16 +37,17 @@ model RefreshToken {
 }
 
 model Order {
-  id                   String    @id @default(cuid())
-  userId               String    @map("user_id")
-  stripeSessionId      String?   @unique @map("stripe_session_id")
-  stripePaymentIntentId String?  @map("stripe_payment_intent_id") // for refund events (charge.refunded / payment_intent.refunded)
-  amountCents          Int       @map("amount_cents")
-  currency             String    @default("eur")
-  status               String    @default("pending") // pending | paid | failed | refunded
-  paidAt               DateTime? @map("paid_at")
-  createdAt            DateTime  @default(now()) @map("created_at")
-  updatedAt            DateTime  @updatedAt @map("updated_at")
+  id                    String    @id @default(cuid())
+  userId                String    @map("user_id")
+  productId             String?   @map("product_id") // product at order creation (read-only display)
+  stripeSessionId       String?   @unique @map("stripe_session_id")
+  stripePaymentIntentId String?   @map("stripe_payment_intent_id") // for refund events (charge.refunded / payment_intent.refunded)
+  amountCents           Int       @map("amount_cents")
+  currency              String    @default("eur")
+  status                String    @default("pending") // pending | paid | failed | refunded
+  paidAt                DateTime? @map("paid_at")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
 
   user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
   paymentEvents PaymentEvent[]
@@ -58,6 +59,8 @@ model Product {
   amountCents Int      @map("amount_cents")
   currency    String   @default("eur")
   active      Boolean  @default(true)
+  /** If false, product cannot be used for Stripe Checkout (internal/test/non-sellable). */
+  sellable    Boolean  @default(true) @map("sellable")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 }
@@ -66,6 +69,7 @@ model PaymentEvent {
   id            String   @id @default(cuid())
   orderId       String?  @map("order_id") // null when order missing (orphaned event)
   orphaned      Boolean  @default(false) @map("orphaned") // true when orderId null / order not found
+  orphanReason  String?  @map("orphan_reason") // e.g. order_not_found, no_order_id, sanity_check_failed (observability)
   stripeEventId String   @unique @map("stripe_event_id") // idempotency key
   type          String   // e.g. checkout.session.completed, payment_intent.succeeded
   payload       Json?    // minimal snapshot (no orderId; RGPD)

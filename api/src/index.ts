@@ -36,7 +36,7 @@ const server = app.listen(config.PORT, () => {
   logger.info(`Server listening on port ${config.PORT}`, meta);
   if (config.NODE_ENV === "production" && config.TRUST_PROXY !== true) {
     logger.warn(
-      "TRUST_PROXY is not set; if the app is behind a reverse proxy (Nginx, Render, Fly), set TRUST_PROXY=1 for correct client IP and rate-limiting"
+      "TRUST_PROXY not set in production: req.ip and rate-limit (e.g. /stripe/webhook) may see a single proxy IP. Set TRUST_PROXY=1 if behind Nginx/Render/Fly."
     );
   }
 });

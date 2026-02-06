@@ -3,7 +3,26 @@ import type Stripe from "stripe";
 import { getStripe } from "./stripe.service.js";
 import { config } from "../../config/index.js";
 import { logger } from "../../lib/logger.js";
+import { safePaymentLogContext } from "../../lib/logContext.js";
 import { prisma } from "../../lib/prisma.js";
+
+/**
+ * ACK policy (no PII/secrets in logs; use safePaymentLogContext):
+ * - 2xx: Event received and processed (or ignored duplicate / unsupported type). Persist PaymentEvent before 2xx for handled types; unsupported types get 200 immediately so Stripe stops retrying.
+ * - 4xx: Missing or invalid stripe-signature / raw body => do not retry (client error).
+ * - 5xx: DB error (persist/update failed) or processing exception => Stripe retries.
+ */
+
+/** Event types handled by this webhook. Others are logged as ignored_event and ACKed 200. */
+const SUPPORTED_EVENTS = new Set<string>([
+  "checkout.session.completed",
+  "checkout.session.expired",
+  "checkout.session.async_payment_succeeded",
+  "checkout.session.async_payment_failed",
+  "charge.refunded",
+  "payment_intent.refunded",
+  "ping",
+]);
 
 /** Verify webhook signature; throws if invalid. */
 export function verifyWebhookEvent(
@@ -13,6 +32,39 @@ export function verifyWebhookEvent(
 ): Stripe.Event {
   const stripe = getStripe();
   return stripe.webhooks.constructEvent(rawBody, signature, webhookSecret);
+}
+
+const ORPHAN_ACK_AGE_SECONDS = 24 * 3600; // > 24h => 200 to stop retries
+
+/** True if Stripe event creation time is older than 24h (unix seconds). */
+function isEventOlderThan24h(event: Stripe.Event): boolean {
+  const created = event.created;
+  if (created == null || typeof created !== "number") return false;
+  return Math.floor(Date.now() / 1000) - created > ORPHAN_ACK_AGE_SECONDS;
+}
+
+/**
+ * If orphaned and event recent: return 500 for retry; else 200. Call after persisting orphaned PaymentEvent.
+ * When orphanReason is "no_order_id" (insoluble), always ACK 200 after persist to avoid infinite retries.
+ */
+function sendOrphanAck(
+  res: Response,
+  orphaned: boolean,
+  event: Stripe.Event,
+  requestId: string | undefined,
+  orphanReason?: string
+): boolean {
+  if (!orphaned) return false;
+  if (orphanReason === "no_order_id") {
+    res.status(200).json({ received: true });
+    return true;
+  }
+  if (isEventOlderThan24h(event)) {
+    res.status(200).json({ received: true });
+    return true;
+  }
+  res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
+  return true;
 }
 
 /** Minimal payload for ledger (RGPD): no orderId in payload; orderId stored only in column. */
@@ -25,49 +77,83 @@ function minimalPayload(event: Stripe.Event): Record<string, unknown> {
   };
 }
 
-/** Sanity checks before mutating Order from a checkout session. Returns false if session is incoherent with order. */
+/**
+ * strict => amount_total === order.amountCents (exact match).
+ * flex   => amount_total >= order.amountCents (allows taxes/shipping). Currency + orderId + paid required.
+ * Logged once on first use. STRIPE_PRICING_MODE ∈ { strict, flex }, default strict (config).
+ */
+let pricingModeLogged = false;
+function getPricingMode(): "strict" | "flex" {
+  const env = process.env.STRIPE_PRICING_MODE;
+  const mode = env === "flex" || env === "strict" ? env : config.STRIPE_PRICING_MODE;
+  if (!pricingModeLogged) {
+    pricingModeLogged = true;
+    logger.info("pricing_mode", safePaymentLogContext({ pricingMode: mode, metric: "pricing_mode" }));
+  }
+  return mode;
+}
+
+type SanityCheckResult = { ok: true } | { ok: false; reason: string };
+
+/** Sanity checks before mutating Order from a checkout session. Uses STRIPE_PRICING_MODE (strict|flex). */
 function sessionOrderSanityCheck(
   session: Stripe.Checkout.Session,
-  orderRow: { id: string; amountCents: number; currency: string }
-): boolean {
-  if (session.mode !== "payment") return false;
+  orderRow: { id: string; amountCents: number; currency: string },
+  pricingMode: "strict" | "flex"
+): SanityCheckResult {
+  if (session.mode !== "payment") return { ok: false, reason: "mode_not_payment" };
   const refOrderId = session.metadata?.orderId ?? session.client_reference_id ?? null;
-  if (refOrderId !== orderRow.id) return false;
-  const amountMatch = session.amount_total != null && session.amount_total === orderRow.amountCents;
+  if (refOrderId !== orderRow.id) return { ok: false, reason: "order_id_mismatch" };
   const currencyMatch =
     (session.currency ?? "").toLowerCase() === (orderRow.currency ?? "").toLowerCase();
-  return amountMatch && currencyMatch;
+  if (!currencyMatch) return { ok: false, reason: "currency_mismatch" };
+
+  if (pricingMode === "strict") {
+    const amountMatch = session.amount_total != null && session.amount_total === orderRow.amountCents;
+    if (!amountMatch) return { ok: false, reason: "amount_mismatch" };
+    return { ok: true };
+  }
+
+  // flex: require payment_status paid (caller already filters for completed/async_succeeded), and amount_total >= order to avoid underpayment
+  const paymentStatus = session.payment_status ?? "";
+  if (paymentStatus !== "paid") return { ok: false, reason: "payment_not_paid" };
+  if (
+    session.amount_total != null &&
+    orderRow.amountCents != null &&
+    session.amount_total < orderRow.amountCents
+  ) {
+    return { ok: false, reason: "amount_underpayment" };
+  }
+  return { ok: true };
 }
 
 /**
  * Durable webhook: persist PaymentEvent first, then process, then ACK.
  * Never 2xx before event is in DB. P2002 => 200 (idempotent). Other DB errors => 500 (Stripe retries).
- * Option A (order missing): when metadata.orderId is set but Order is not found, return 500 and do not
- * persist PaymentEvent, so Stripe retries and we can process once the order exists (e.g. replication lag).
- * Scenarios: (1) duplicate event => 200, no double apply (2) DB error => 500 => retry => correct state
- * (3) event before Order exists => 500 => retry (4) success_url without payment => no effect (5) expired => status failed.
+ * Order missing: persist PaymentEvent with orphaned=true and payload.orphanReason (e.g. order_not_found).
+ * ACK strategy: if orphaned and (event > 24h old OR duplicate P2002 with existing.orphaned) => 200 (stop retries);
+ * else orphaned => 500 for retry. Never 2xx before signature verification. Idempotence via unique stripeEventId.
  */
 export async function handleStripeWebhook(req: Request, res: Response): Promise<void> {
   const rawBody = req.body as Buffer | undefined;
   const sig = req.headers["stripe-signature"] as string | undefined;
   const requestId = req.requestId;
 
-  const safeMeta = (meta: Record<string, unknown>) => (requestId ? { ...meta, requestId } : meta);
-
   if (!rawBody || !Buffer.isBuffer(rawBody)) {
+    logger.warn("Stripe webhook missing raw body", safePaymentLogContext({ requestId, metric: "webhook_acked_4xx" }));
     res.status(400).json({ error: "Missing raw body", ...(requestId && { requestId }) });
     return;
   }
 
   if (!sig) {
-    logger.warn("Stripe webhook missing signature", safeMeta({}));
+    logger.warn("Stripe webhook missing signature", safePaymentLogContext({ requestId, metric: "webhook_acked_4xx" }));
     res.status(400).json({ error: "Missing stripe-signature header", ...(requestId && { requestId }) });
     return;
   }
 
   const webhookSecret = config.STRIPE_WEBHOOK_SECRET;
   if (!webhookSecret) {
-    logger.warn("STRIPE_WEBHOOK_SECRET not set");
+    logger.warn("STRIPE_WEBHOOK_SECRET not set", safePaymentLogContext({ requestId, metric: "webhook_acked_5xx" }));
     res.status(500).json({ error: "Webhook not configured", ...(requestId && { requestId }) });
     return;
   }
@@ -77,13 +163,22 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
     event = verifyWebhookEvent(rawBody, sig, webhookSecret);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Invalid signature";
-    logger.warn("Stripe webhook signature verification failed", safeMeta({ error: message }));
+    logger.warn("Stripe webhook signature verification failed", safePaymentLogContext({ requestId, error: message, metric: "webhook_acked_4xx" }));
     res.status(400).json({ error: "Invalid signature", ...(requestId && { requestId }) });
     return;
   }
 
   const stripeEventId = event.id;
+  logger.info("webhook_received", safePaymentLogContext({ requestId, stripeEventId, eventType: event.type, metric: "webhook_received" }));
+
+  if (!SUPPORTED_EVENTS.has(event.type)) {
+    logger.info("ignored_event", safePaymentLogContext({ requestId, stripeEventId, eventType: event.type, metric: "ignored_event" }));
+    res.status(200).json({ received: true });
+    return;
+  }
+
   const payload = minimalPayload(event);
+  const safe = (meta: Record<string, unknown>) => safePaymentLogContext({ requestId, stripeEventId, ...meta });
 
   try {
     if (event.type === "checkout.session.completed") {
@@ -92,6 +187,7 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
       const sessionId = session.id;
       const paymentStatus = session.payment_status ?? "";
 
+      let orphanReason: string | undefined;
       const payloadSnapshot: Record<string, unknown> = {
         stripeEventId: event.id,
         stripeSessionId: sessionId,
@@ -106,6 +202,7 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
 
       if (paymentStatus !== "paid") {
         orphaned = true;
+        orphanReason = "payment_not_paid";
         if (orderIdFromEvent) {
           logger.warn("checkout.session.completed payment not paid, order not updated", {
             requestId,
@@ -120,32 +217,40 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
           where: { id: orderIdFromEvent },
           select: { id: true, amountCents: true, currency: true },
         });
-        // Option A: orderId present but Order not found => 500 so Stripe retries; no ACK to avoid losing confirmation.
         if (!orderRow) {
-          logger.warn("checkout.session.completed order not found, returning 500 for retry", {
-            requestId,
-            stripeEventId,
-            stripeSessionId: sessionId,
-            orderId: orderIdFromEvent,
-          });
-          res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
-          return;
-        }
-        if (!sessionOrderSanityCheck(session, orderRow)) {
-          logger.warn("checkout.session.completed sanity check failed, order not marked paid", {
-            requestId,
-            stripeEventId,
-            stripeSessionId: sessionId,
-            orderId: orderIdFromEvent,
-            sessionMode: session.mode,
-            sessionAmount: session.amount_total,
-            sessionCurrency: session.currency,
-            orderAmountCents: orderRow.amountCents,
-            orderCurrency: orderRow.currency,
-          });
           orphaned = true;
+          orphanReason = "order_not_found";
+          logger.warn("checkout.session.completed order not found, storing as orphaned", {
+            requestId,
+            stripeEventId,
+            stripeSessionId: sessionId,
+            orderId: orderIdFromEvent,
+            orphaned: true,
+            reason: "order_not_found",
+          });
+        } else {
+          const pricingMode = getPricingMode();
+          const sanityResult = sessionOrderSanityCheck(session, orderRow, pricingMode);
+          if (!sanityResult.ok) {
+            orphaned = true;
+            orphanReason = "sanity_check_failed";
+            logger.warn("checkout.session.completed sanity check failed, order not marked paid", {
+              requestId,
+              stripeEventId,
+              stripeSessionId: sessionId,
+              orderId: orderIdFromEvent,
+              pricingMode,
+              reason: sanityResult.reason,
+              sessionMode: session.mode,
+              sessionAmount: session.amount_total,
+              sessionCurrency: session.currency,
+              orderAmountCents: orderRow.amountCents,
+              orderCurrency: orderRow.currency,
+            });
+          }
         }
       }
+      if (orphanReason) payloadSnapshot.orphanReason = orphanReason;
 
       try {
         await prisma.paymentEvent.create({
@@ -154,17 +259,138 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
             type: event.type,
             orderId,
             orphaned,
+            ...(orphanReason != null && { orphanReason }),
             payload: payloadSnapshot,
           },
         });
+        if (orphaned) {
+          logger.info(
+            "stripe_webhook_orphaned",
+            safePaymentLogContext({
+              requestId,
+              stripeEventId,
+              eventType: event.type,
+              orderId: orderIdFromEvent ?? undefined,
+              orphanReason: orphanReason ?? undefined,
+              metric: "payment_orphaned",
+            }),
+          );
+        }
       } catch (createErr: unknown) {
-        const code = createErr && typeof createErr === "object" && "code" in createErr ? (createErr as { code?: string }).code : undefined;
+        const code =
+          createErr && typeof createErr === "object" && "code" in createErr
+            ? (createErr as { code?: string }).code
+            : undefined;
         if (code === "P2002") {
-          logger.info("Stripe webhook duplicate ignored", { requestId, stripeEventId, stripeSessionId: sessionId, orderId: orderIdFromEvent });
           const existing = await prisma.paymentEvent.findUnique({
             where: { stripeEventId },
             select: { orphaned: true },
           });
+
+          // Duplicate of an orphaned ledger: try to repair if Order exists now, otherwise keep orphan ACK strategy.
+          if (existing?.orphaned) {
+            if (!orderIdFromEvent) {
+              // No orderId in event: insoluble orphan → keep existing orphan ACK policy (500 until cutoff, then 200).
+              if (sendOrphanAck(res, true, event, requestId, orphanReason)) return;
+              logger.info(
+                "webhook_acked_200",
+                safePaymentLogContext({
+                  requestId,
+                  stripeEventId,
+                  stripeSessionId: sessionId,
+                  orderId: orderIdFromEvent ?? undefined,
+                  metric: "webhook_acked_200",
+                }),
+              );
+              res.status(200).json({ received: true });
+              return;
+            }
+
+            const orderRow = await prisma.order.findUnique({
+              where: { id: orderIdFromEvent },
+              select: { id: true, amountCents: true, currency: true },
+            });
+
+            if (!orderRow) {
+              // Still orphaned: keep retry policy (500 until cutoff, then 200).
+              if (sendOrphanAck(res, true, event, requestId, orphanReason ?? "order_not_found")) return;
+              logger.info(
+                "webhook_acked_200",
+                safePaymentLogContext({
+                  requestId,
+                  stripeEventId,
+                  stripeSessionId: sessionId,
+                  orderId: orderIdFromEvent,
+                  metric: "webhook_acked_200",
+                }),
+              );
+              res.status(200).json({ received: true });
+              return;
+            }
+
+            const pricingMode = getPricingMode();
+            const sanityResult = sessionOrderSanityCheck(session, orderRow, pricingMode);
+            if (!sanityResult.ok) {
+              // Still considered orphan/sanity failure: let existing orphan ACK policy apply.
+              if (sendOrphanAck(res, true, event, requestId, "sanity_check_failed")) return;
+              logger.info(
+                "webhook_acked_200",
+                safePaymentLogContext({
+                  requestId,
+                  stripeEventId,
+                  stripeSessionId: sessionId,
+                  orderId: orderIdFromEvent,
+                  metric: "webhook_acked_200",
+                }),
+              );
+              res.status(200).json({ received: true });
+              return;
+            }
+
+            const paymentIntentId =
+              typeof session.payment_intent === "string"
+                ? session.payment_intent
+                : (session.payment_intent as Stripe.PaymentIntent)?.id ?? null;
+
+            await prisma.$transaction(async (tx) => {
+              await tx.order.updateMany({
+                where: { id: orderIdFromEvent, status: { not: "paid" } },
+                data: {
+                  stripeSessionId: sessionId,
+                  ...(paymentIntentId && { stripePaymentIntentId: paymentIntentId }),
+                  status: "paid",
+                  paidAt: new Date(),
+                },
+              });
+              await tx.paymentEvent.update({
+                where: { stripeEventId },
+                data: { orphaned: false, orphanReason: null, orderId: orderIdFromEvent },
+              });
+            });
+
+            logger.info(
+              "webhook_acked_200",
+              safePaymentLogContext({
+                requestId,
+                stripeEventId,
+                stripeSessionId: sessionId,
+                orderId: orderIdFromEvent,
+                metric: "webhook_acked_200",
+              }),
+            );
+            res.status(200).json({ received: true });
+            return;
+          }
+
+          logger.info(
+            "Stripe webhook duplicate ignored",
+            safePaymentLogContext({
+              requestId,
+              stripeEventId,
+              stripeSessionId: sessionId,
+              orderId: orderIdFromEvent,
+            }),
+          );
           if (orderIdFromEvent && sessionId && existing && !existing.orphaned) {
             const paymentIntentId =
               typeof session.payment_intent === "string"
@@ -184,9 +410,15 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
           return;
         }
         if (config.NODE_ENV === "production") {
-          logger.error("Webhook persist failed", { requestId, stripeEventId, errorCode: "persist_failed" });
+          logger.error(
+            "Webhook persist failed",
+            safePaymentLogContext({ requestId, stripeEventId, errorCode: "persist_failed", metric: "webhook_acked_5xx" }),
+          );
         } else {
-          logger.error("Webhook persist failed", { requestId, stripeEventId, error: String(createErr) });
+          logger.error(
+            "Webhook persist failed",
+            safePaymentLogContext({ requestId, stripeEventId, error: String(createErr), metric: "webhook_acked_5xx" }),
+          );
         }
         res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
         return;
@@ -206,25 +438,19 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
             paidAt: new Date(),
           },
         });
-        logger.info("Stripe webhook outcome", {
-          requestId,
-          stripeEventId,
-          stripeSessionId: sessionId,
-          orderId: orderIdFromEvent,
-          outcome: updateResult.count > 0 ? "updated_order" : "noop",
-        });
+        const paidMetric = updateResult.count > 0 ? "order_marked_paid" : "order_already_paid";
+        logger.info("Stripe webhook outcome", safePaymentLogContext({ requestId, stripeEventId, stripeSessionId: sessionId, orderId: orderIdFromEvent, outcome: updateResult.count > 0 ? "updated_order" : "noop", metric: paidMetric }));
       } else if (orphaned) {
-        logger.warn("checkout.session.completed stored as orphaned", {
-          requestId,
-          stripeEventId,
-          stripeSessionId: sessionId,
-          orderId: orderIdFromEvent,
-        });
+        if (sendOrphanAck(res, true, event, requestId, orphanReason)) return;
       }
+      logger.info("webhook_acked_200", safePaymentLogContext({ requestId, stripeEventId, stripeSessionId: sessionId, orderId: orderIdFromEvent, metric: "webhook_acked_200" }));
+      res.status(200).json({ received: true });
+      return;
     } else if (event.type === "checkout.session.async_payment_succeeded") {
       const session = event.data.object as Stripe.Checkout.Session;
       const orderIdFromEvent = session.metadata?.orderId ?? session.client_reference_id ?? null;
       const sessionId = session.id;
+      let orphanReason: string | undefined;
       const payloadSnapshot: Record<string, unknown> = {
         stripeEventId: event.id,
         stripeSessionId: sessionId,
@@ -240,38 +466,161 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
           where: { id: orderIdFromEvent },
           select: { id: true, amountCents: true, currency: true },
         });
-        // Option A: order not found => 500 for retry (no ACK).
         if (!orderRow) {
-          logger.warn("checkout.session.async_payment_succeeded order not found, returning 500 for retry", {
-            requestId,
-            stripeEventId,
-            stripeSessionId: sessionId,
-            orderId: orderIdFromEvent,
-          });
-          res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
-          return;
-        }
-        if (!sessionOrderSanityCheck(session, orderRow)) {
           orphaned = true;
-          logger.warn("checkout.session.async_payment_succeeded sanity check failed, order not marked paid", {
+          orphanReason = "order_not_found";
+          logger.warn("checkout.session.async_payment_succeeded order not found, storing as orphaned", {
             requestId,
             stripeEventId,
             stripeSessionId: sessionId,
             orderId: orderIdFromEvent,
+            orphaned: true,
+            reason: "order_not_found",
           });
+        } else {
+          const pricingMode = getPricingMode();
+          const sanityResult = sessionOrderSanityCheck(session, orderRow, pricingMode);
+          if (!sanityResult.ok) {
+            orphaned = true;
+            orphanReason = "sanity_check_failed";
+            logger.warn("checkout.session.async_payment_succeeded sanity check failed, order not marked paid", {
+              requestId,
+              stripeEventId,
+              stripeSessionId: sessionId,
+              orderId: orderIdFromEvent,
+              pricingMode,
+              reason: sanityResult.reason,
+            });
+          }
         }
       }
+      if (orphanReason) payloadSnapshot.orphanReason = orphanReason;
       try {
         await prisma.paymentEvent.create({
-          data: { stripeEventId, type: event.type, orderId, orphaned, payload: payloadSnapshot },
+          data: {
+            stripeEventId,
+            type: event.type,
+            orderId,
+            orphaned,
+            ...(orphanReason != null && { orphanReason }),
+            payload: payloadSnapshot,
+          },
         });
+        if (orphaned) {
+          logger.info(
+            "stripe_webhook_orphaned",
+            safePaymentLogContext({
+              requestId,
+              stripeEventId,
+              eventType: event.type,
+              orderId: orderIdFromEvent ?? undefined,
+              orphanReason: orphanReason ?? undefined,
+              metric: "payment_orphaned",
+            }),
+          );
+        }
       } catch (createErr: unknown) {
-        const code = createErr && typeof createErr === "object" && "code" in createErr ? (createErr as { code?: string }).code : undefined;
+        const code =
+          createErr && typeof createErr === "object" && "code" in createErr
+            ? (createErr as { code?: string }).code
+            : undefined;
         if (code === "P2002") {
           const existing = await prisma.paymentEvent.findUnique({
             where: { stripeEventId },
             select: { orphaned: true },
           });
+
+          if (existing?.orphaned) {
+            if (!orderIdFromEvent) {
+              if (sendOrphanAck(res, true, event, requestId, orphanReason)) return;
+              logger.info(
+                "webhook_acked_200",
+                safePaymentLogContext({
+                  requestId,
+                  stripeEventId,
+                  stripeSessionId: sessionId,
+                  orderId: orderIdFromEvent ?? undefined,
+                  metric: "webhook_acked_200",
+                }),
+              );
+              res.status(200).json({ received: true });
+              return;
+            }
+
+            const orderRow = await prisma.order.findUnique({
+              where: { id: orderIdFromEvent },
+              select: { id: true, amountCents: true, currency: true },
+            });
+
+            if (!orderRow) {
+              if (sendOrphanAck(res, true, event, requestId, orphanReason ?? "order_not_found")) return;
+              logger.info(
+                "webhook_acked_200",
+                safePaymentLogContext({
+                  requestId,
+                  stripeEventId,
+                  stripeSessionId: sessionId,
+                  orderId: orderIdFromEvent,
+                  metric: "webhook_acked_200",
+                }),
+              );
+              res.status(200).json({ received: true });
+              return;
+            }
+
+            const pricingMode = getPricingMode();
+            const sanityResult = sessionOrderSanityCheck(session, orderRow, pricingMode);
+            if (!sanityResult.ok) {
+              if (sendOrphanAck(res, true, event, requestId, "sanity_check_failed")) return;
+              logger.info(
+                "webhook_acked_200",
+                safePaymentLogContext({
+                  requestId,
+                  stripeEventId,
+                  stripeSessionId: sessionId,
+                  orderId: orderIdFromEvent,
+                  metric: "webhook_acked_200",
+                }),
+              );
+              res.status(200).json({ received: true });
+              return;
+            }
+
+            const paymentIntentId =
+              typeof session.payment_intent === "string"
+                ? session.payment_intent
+                : (session.payment_intent as Stripe.PaymentIntent)?.id ?? null;
+
+            await prisma.$transaction(async (tx) => {
+              await tx.order.updateMany({
+                where: { id: orderIdFromEvent, status: { not: "paid" } },
+                data: {
+                  stripeSessionId: sessionId,
+                  ...(paymentIntentId && { stripePaymentIntentId: paymentIntentId }),
+                  status: "paid",
+                  paidAt: new Date(),
+                },
+              });
+              await tx.paymentEvent.update({
+                where: { stripeEventId },
+                data: { orphaned: false, orphanReason: null, orderId: orderIdFromEvent },
+              });
+            });
+
+            logger.info(
+              "webhook_acked_200",
+              safePaymentLogContext({
+                requestId,
+                stripeEventId,
+                stripeSessionId: sessionId,
+                orderId: orderIdFromEvent,
+                metric: "webhook_acked_200",
+              }),
+            );
+            res.status(200).json({ received: true });
+            return;
+          }
+
           if (orderIdFromEvent && sessionId && existing && !existing.orphaned) {
             const paymentIntentId =
               typeof session.payment_intent === "string"
@@ -291,9 +640,15 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
           return;
         }
         if (config.NODE_ENV === "production") {
-          logger.error("Webhook persist failed", { requestId, stripeEventId, errorCode: "persist_failed" });
+          logger.error(
+            "Webhook persist failed",
+            safePaymentLogContext({ requestId, stripeEventId, errorCode: "persist_failed", metric: "webhook_acked_5xx" }),
+          );
         } else {
-          logger.error("Webhook persist failed", { requestId, stripeEventId, error: String(createErr) });
+          logger.error(
+            "Webhook persist failed",
+            safePaymentLogContext({ requestId, stripeEventId, error: String(createErr), metric: "webhook_acked_5xx" }),
+          );
         }
         res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
         return;
@@ -303,7 +658,7 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
           typeof session.payment_intent === "string"
             ? session.payment_intent
             : (session.payment_intent as Stripe.PaymentIntent)?.id ?? null;
-        await prisma.order.updateMany({
+        const updateResult = await prisma.order.updateMany({
           where: { id: orderIdFromEvent, status: { not: "paid" } },
           data: {
             stripeSessionId: sessionId,
@@ -312,13 +667,21 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
             paidAt: new Date(),
           },
         });
+        logger.info("Stripe webhook outcome", safePaymentLogContext({ requestId, stripeEventId, stripeSessionId: sessionId, orderId: orderIdFromEvent, outcome: updateResult.count > 0 ? "updated_order" : "noop", metric: updateResult.count > 0 ? "order_marked_paid" : "order_already_paid" }));
       }
+      if (orphaned && sendOrphanAck(res, true, event, requestId, orphanReason)) return;
+      logger.info("webhook_acked_200", safePaymentLogContext({ requestId, stripeEventId, stripeSessionId: sessionId, orderId: orderIdFromEvent, metric: "webhook_acked_200" }));
       res.status(200).json({ received: true });
       return;
-    } else if (event.type === "checkout.session.async_payment_failed") {
+    } else if (
+      event.type === "checkout.session.expired" ||
+      event.type === "checkout.session.async_payment_failed"
+    ) {
+      // Same idempotent pattern as checkout.session.completed: persist PaymentEvent first, then process. Never validate payment; set Order.status = "failed" only.
       const session = event.data.object as Stripe.Checkout.Session;
       const orderIdFromEvent = session.metadata?.orderId ?? session.client_reference_id ?? null;
       const sessionId = session.id;
+      let orphanReason: string | undefined;
       const payloadSnapshot: Record<string, unknown> = {
         stripeEventId: event.id,
         stripeSessionId: sessionId,
@@ -331,124 +694,120 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
           where: { id: orderIdFromEvent },
           select: { id: true },
         });
-        // Option A: order not found => 500 for retry (no ACK).
         if (!orderRow) {
-          logger.warn("checkout.session.async_payment_failed order not found, returning 500 for retry", {
+          orphaned = true;
+          orphanReason = "order_not_found";
+          logger.warn(`${event.type} order not found, storing as orphaned`, {
             requestId,
             stripeEventId,
             stripeSessionId: sessionId,
             orderId: orderIdFromEvent,
+            orphaned: true,
+            reason: "order_not_found",
           });
-          res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
-          return;
         }
-        orphaned = false;
+      } else {
+        orphanReason = "no_order_id";
       }
-      try {
-        await prisma.paymentEvent.create({
-          data: { stripeEventId, type: event.type, orderId, orphaned, payload: payloadSnapshot },
-        });
-      } catch (createErr: unknown) {
-        const code = createErr && typeof createErr === "object" && "code" in createErr ? (createErr as { code?: string }).code : undefined;
-        if (code === "P2002") {
-          const existing = await prisma.paymentEvent.findUnique({
-            where: { stripeEventId },
-            select: { orderId: true },
-          });
-          if (existing?.orderId) {
-            await prisma.order.updateMany({
-              where: { id: existing.orderId, status: "pending" },
-              data: { status: "failed" },
-            });
-          }
-          res.status(200).json({ received: true });
-          return;
-        }
-        if (config.NODE_ENV === "production") {
-          logger.error("Webhook persist failed", { requestId, stripeEventId, errorCode: "persist_failed" });
-        } else {
-          logger.error("Webhook persist failed", { requestId, stripeEventId, error: String(createErr) });
-        }
-        res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
-        return;
-      }
-      if (orderId && !orphaned) {
-        await prisma.order.updateMany({
-          where: { id: orderId, status: "pending" },
-          data: { status: "failed" },
-        });
-      }
-      res.status(200).json({ received: true });
-      return;
-    } else if (event.type === "checkout.session.expired") {
-      const session = event.data.object as Stripe.Checkout.Session;
-      const orderIdFromEvent = (session.metadata?.orderId ?? session.client_reference_id) as string | null;
-      const sessionId = session.id;
-      const payloadSnapshot: Record<string, unknown> = {
-        stripeEventId: event.id,
-        stripeSessionId: sessionId,
-        type: event.type,
-      };
-      if (!orderIdFromEvent) {
-        try {
-          await prisma.paymentEvent.create({
-            data: {
-              stripeEventId,
-              type: event.type,
-              orderId: null,
-              orphaned: true,
-              payload: payloadSnapshot,
-            },
-          });
-        } catch (createErr: unknown) {
-          const code = createErr && typeof createErr === "object" && "code" in createErr ? (createErr as { code?: string }).code : undefined;
-          if (code === "P2002") {
-            res.status(200).json({ received: true });
-            return;
-          }
-          if (config.NODE_ENV === "production") {
-            logger.error("Webhook persist failed", { requestId, stripeEventId, errorCode: "persist_failed" });
-          } else {
-            logger.error("Webhook persist failed", { requestId, stripeEventId, error: String(createErr) });
-          }
-          res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
-          return;
-        }
-        res.status(200).json({ received: true });
-        return;
-      }
-      const orderRow = await prisma.order.findUnique({
-        where: { id: orderIdFromEvent },
-        select: { id: true, status: true },
-      });
-      // Option A: orderId present but Order not found => 500 for retry.
-      if (!orderRow) {
-        logger.warn("checkout.session.expired order not found, returning 500 for retry", {
-          requestId,
-          stripeEventId,
-          stripeSessionId: sessionId,
-          orderId: orderIdFromEvent,
-        });
-        res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
-        return;
-      }
+      if (orphanReason) payloadSnapshot.orphanReason = orphanReason;
       try {
         await prisma.paymentEvent.create({
           data: {
             stripeEventId,
             type: event.type,
-            orderId: orderIdFromEvent,
-            orphaned: false,
+            orderId,
+            orphaned,
+            ...(orphanReason != null && { orphanReason }),
             payload: payloadSnapshot,
           },
         });
+        if (orphaned) {
+          logger.info(
+            "stripe_webhook_orphaned",
+            safePaymentLogContext({
+              requestId,
+              stripeEventId,
+              eventType: event.type,
+              orderId: orderIdFromEvent ?? undefined,
+              orphanReason: orphanReason ?? undefined,
+              metric: "payment_orphaned",
+            }),
+          );
+        }
       } catch (createErr: unknown) {
-        const code = createErr && typeof createErr === "object" && "code" in createErr ? (createErr as { code?: string }).code : undefined;
+        const code =
+          createErr && typeof createErr === "object" && "code" in createErr
+            ? (createErr as { code?: string }).code
+            : undefined;
         if (code === "P2002") {
           const existing = await prisma.paymentEvent.findUnique({
             where: { stripeEventId },
-            select: { orderId: true },
+            select: { orderId: true, orphaned: true },
           });
+
+          if (existing?.orphaned) {
+            if (!orderIdFromEvent) {
+              if (sendOrphanAck(res, true, event, requestId, orphanReason)) return;
+              logger.info(
+                "webhook_acked_200",
+                safePaymentLogContext({
+                  requestId,
+                  stripeEventId,
+                  stripeSessionId: sessionId,
+                  orderId: orderIdFromEvent ?? undefined,
+                  metric: "webhook_acked_200",
+                }),
+              );
+              res.status(200).json({ received: true });
+              return;
+            }
+
+            const orderRow = await prisma.order.findUnique({
+              where: { id: orderIdFromEvent },
+              select: { id: true },
+            });
+
+            if (!orderRow) {
+              if (sendOrphanAck(res, true, event, requestId, orphanReason ?? "order_not_found")) return;
+              logger.info(
+                "webhook_acked_200",
+                safePaymentLogContext({
+                  requestId,
+                  stripeEventId,
+                  stripeSessionId: sessionId,
+                  orderId: orderIdFromEvent,
+                  metric: "webhook_acked_200",
+                }),
+              );
+              res.status(200).json({ received: true });
+              return;
+            }
+
+            await prisma.$transaction(async (tx) => {
+              await tx.order.updateMany({
+                where: { id: orderIdFromEvent, status: "pending" },
+                data: { status: "failed" },
+              });
+              await tx.paymentEvent.update({
+                where: { stripeEventId },
+                data: { orphaned: false, orphanReason: null, orderId: orderIdFromEvent },
+              });
+            });
+
+            logger.info(
+              "webhook_acked_200",
+              safePaymentLogContext({
+                requestId,
+                stripeEventId,
+                stripeSessionId: sessionId,
+                orderId: orderIdFromEvent,
+                metric: "webhook_acked_200",
+              }),
+            );
+            res.status(200).json({ received: true });
+            return;
+          }
+
           if (existing?.orderId) {
             await prisma.order.updateMany({
               where: { id: existing.orderId, status: "pending" },
@@ -459,25 +818,34 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
           return;
         }
         if (config.NODE_ENV === "production") {
-          logger.error("Webhook persist failed", { requestId, stripeEventId, errorCode: "persist_failed" });
+          logger.error(
+            "Webhook persist failed",
+            safePaymentLogContext({ requestId, stripeEventId, errorCode: "persist_failed", metric: "webhook_acked_5xx" }),
+          );
         } else {
-          logger.error("Webhook persist failed", { requestId, stripeEventId, error: String(createErr) });
+          logger.error(
+            "Webhook persist failed",
+            safePaymentLogContext({ requestId, stripeEventId, error: String(createErr), metric: "webhook_acked_5xx" }),
+          );
         }
         res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
         return;
       }
-      if (orderRow.status === "pending") {
-        await prisma.order.updateMany({
-          where: { id: orderIdFromEvent, status: "pending" },
+      if (orderId && !orphaned) {
+        const updateResult = await prisma.order.updateMany({
+          where: { id: orderId, status: "pending" },
           data: { status: "failed" },
         });
-        logger.info("checkout.session.expired order marked failed", {
-          requestId,
-          stripeEventId,
-          stripeSessionId: sessionId,
-          orderId: orderIdFromEvent,
-        });
+        logger.info(
+          event.type === "checkout.session.expired"
+            ? "checkout.session.expired order marked failed"
+            : "checkout.session.async_payment_failed order marked failed",
+          safePaymentLogContext({ requestId, stripeEventId, stripeSessionId: sessionId, orderId, outcome: updateResult.count > 0 ? "updated_order" : "noop", metric: "webhook_acked_200" })
+        );
+      } else if (orphaned) {
+        if (sendOrphanAck(res, true, event, requestId, orphanReason)) return;
       }
+      logger.info("webhook_acked_200", safePaymentLogContext({ requestId, stripeEventId, stripeSessionId: sessionId, orderId: orderIdFromEvent, metric: "webhook_acked_200" }));
       res.status(200).json({ received: true });
       return;
     } else if (event.type === "charge.refunded") {
@@ -524,9 +892,13 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
             type: event.type,
             orderId,
             orphaned,
+            ...(orphaned && { orphanReason: "order_not_found" as const }),
             payload: payloadSnapshot,
           },
         });
+        if (orphaned) {
+          logger.info("stripe_webhook_orphaned", safePaymentLogContext({ requestId, stripeEventId, eventType: event.type, orderId: undefined, orphanReason: "order_not_found", metric: "payment_orphaned" }));
+        }
       } catch (createErr: unknown) {
         const code = createErr && typeof createErr === "object" && "code" in createErr ? (createErr as { code?: string }).code : undefined;
         if (code === "P2002") {
@@ -544,9 +916,9 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
           return;
         }
         if (config.NODE_ENV === "production") {
-          logger.error("Webhook persist failed", { requestId, stripeEventId, errorCode: "persist_failed" });
+          logger.error("Webhook persist failed", safePaymentLogContext({ requestId, stripeEventId, errorCode: "persist_failed", metric: "webhook_acked_5xx" }));
         } else {
-          logger.error("Webhook persist failed", { requestId, stripeEventId, error: String(createErr) });
+          logger.error("Webhook persist failed", safePaymentLogContext({ requestId, stripeEventId, error: String(createErr), metric: "webhook_acked_5xx" }));
         }
         res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
         return;
@@ -557,15 +929,11 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
           where: { id: orderId, status: "paid" },
           data: { status: "refunded" },
         });
-        logger.info("Stripe webhook outcome", {
-          requestId,
-          stripeEventId,
-          orderId,
-          outcome: updateResult.count > 0 ? "refunded" : "noop",
-        });
-      } else if (orphaned) {
-        logger.warn("charge.refunded stored as orphaned", { requestId, stripeEventId, chargeId: charge.id });
+        logger.info("Stripe webhook outcome", safePaymentLogContext({ requestId, stripeEventId, orderId, outcome: updateResult.count > 0 ? "refunded" : "noop", metric: "webhook_acked_200" }));
       }
+      logger.info("webhook_acked_200", safePaymentLogContext({ requestId, stripeEventId, orderId: orderId ?? undefined, metric: "webhook_acked_200" }));
+      res.status(200).json({ received: true });
+      return;
     } else if (event.type === "payment_intent.refunded") {
       const pi = event.data.object as Stripe.PaymentIntent;
       const amountReceived = pi.amount_received ?? 0;
@@ -603,14 +971,6 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
           orphaned = false;
         }
       }
-      if (orphaned) {
-        logger.warn("payment_intent.refunded order not found", {
-          requestId,
-          stripeEventId,
-          paymentIntentId: pi.id,
-        });
-      }
-
       try {
         await prisma.paymentEvent.create({
           data: {
@@ -618,9 +978,13 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
             type: event.type,
             orderId,
             orphaned,
+            ...(orphaned && { orphanReason: "order_not_found" as const }),
             payload: payloadSnapshot,
           },
         });
+        if (orphaned) {
+          logger.info("stripe_webhook_orphaned", safePaymentLogContext({ requestId, stripeEventId, eventType: event.type, orderId: undefined, orphanReason: "order_not_found", metric: "payment_orphaned" }));
+        }
       } catch (createErr: unknown) {
         const code = createErr && typeof createErr === "object" && "code" in createErr ? (createErr as { code?: string }).code : undefined;
         if (code === "P2002") {
@@ -638,9 +1002,9 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
           return;
         }
         if (config.NODE_ENV === "production") {
-          logger.error("Webhook persist failed", { requestId, stripeEventId, errorCode: "persist_failed" });
+          logger.error("Webhook persist failed", safePaymentLogContext({ requestId, stripeEventId, errorCode: "persist_failed", metric: "webhook_acked_5xx" }));
         } else {
-          logger.error("Webhook persist failed", { requestId, stripeEventId, error: String(createErr) });
+          logger.error("Webhook persist failed", safePaymentLogContext({ requestId, stripeEventId, error: String(createErr), metric: "webhook_acked_5xx" }));
         }
         res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
         return;
@@ -651,15 +1015,11 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
           where: { id: orderId, status: "paid" },
           data: { status: "refunded" },
         });
-        logger.info("Stripe webhook outcome", {
-          requestId,
-          stripeEventId,
-          orderId,
-          outcome: updateResult.count > 0 ? "refunded" : "noop",
-        });
-      } else if (orphaned) {
-        logger.warn("payment_intent.refunded stored as orphaned", { requestId, stripeEventId, paymentIntentId: pi.id });
+        logger.info("Stripe webhook outcome", safePaymentLogContext({ requestId, stripeEventId, orderId, outcome: updateResult.count > 0 ? "refunded" : "noop", metric: "webhook_acked_200" }));
       }
+      logger.info("webhook_acked_200", safePaymentLogContext({ requestId, stripeEventId, orderId: orderId ?? undefined, metric: "webhook_acked_200" }));
+      res.status(200).json({ received: true });
+      return;
     } else {
       try {
         await prisma.paymentEvent.create({
@@ -668,33 +1028,35 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
             type: event.type,
             orderId: null,
             orphaned: true,
+            orphanReason: "unknown_event_type",
             payload,
           },
         });
+        logger.info("stripe_webhook_orphaned", safePaymentLogContext({ requestId, stripeEventId, eventType: event.type, orderId: undefined, orphanReason: "unknown_event_type", metric: "payment_orphaned" }));
       } catch (createErr: unknown) {
         const code = createErr && typeof createErr === "object" && "code" in createErr ? (createErr as { code?: string }).code : undefined;
         if (code === "P2002") {
-          logger.info("Stripe webhook duplicate ignored", { requestId, stripeEventId, type: event.type });
+          logger.info("Stripe webhook duplicate ignored", safePaymentLogContext({ requestId, stripeEventId, eventType: event.type, metric: "webhook_acked_200" }));
           res.status(200).json({ received: true });
           return;
         }
         if (config.NODE_ENV === "production") {
-          logger.error("Webhook persist failed", { requestId, stripeEventId, errorCode: "persist_failed" });
+          logger.error("Webhook persist failed", safePaymentLogContext({ requestId, stripeEventId, errorCode: "persist_failed", metric: "webhook_acked_5xx" }));
         } else {
-          logger.error("Webhook persist failed", { requestId, stripeEventId, error: String(createErr) });
+          logger.error("Webhook persist failed", safePaymentLogContext({ requestId, stripeEventId, error: String(createErr), metric: "webhook_acked_5xx" }));
         }
         res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
         return;
       }
-      logger.info("Stripe webhook event", { requestId, stripeEventId, type: event.type });
+      logger.info("webhook_acked_200", safePaymentLogContext({ requestId, stripeEventId, eventType: event.type, metric: "webhook_acked_200" }));
+      res.status(200).json({ received: true });
+      return;
     }
-
-    res.status(200).json({ received: true });
   } catch (err) {
     if (config.NODE_ENV === "production") {
-      logger.error("Webhook processing failed", { requestId, stripeEventId, errorCode: "processing_failed" });
+      logger.error("Webhook processing failed", safePaymentLogContext({ requestId, stripeEventId, errorCode: "processing_failed", metric: "webhook_acked_5xx" }));
     } else {
-      logger.error("Webhook processing failed", { requestId, stripeEventId, error: String(err) });
+      logger.error("Webhook processing failed", safePaymentLogContext({ requestId, stripeEventId, error: String(err), metric: "webhook_acked_5xx" }));
     }
     res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
   }

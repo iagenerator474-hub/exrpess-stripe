@@ -16,6 +16,8 @@ export interface CreateCheckoutSessionParams {
   orderId: string;
   amountCents: number;
   currency: string;
+  /** Server-only: from User.email, never from client. Omit if absent. */
+  customer_email?: string;
 }
 
 export interface CreateCheckoutSessionResult {
@@ -42,10 +44,12 @@ export async function createCheckoutSession(
         quantity: 1,
       },
     ],
+    // success_url: redirect only. Never use it to validate a payment. Validation must always go via GET /payments/orders/:id (webhook updates order, then client polls that endpoint).
     success_url: config.STRIPE_SUCCESS_URL,
     cancel_url: config.STRIPE_CANCEL_URL,
     client_reference_id: params.orderId,
     metadata: { orderId: params.orderId },
+    ...(params.customer_email && params.customer_email.trim() && { customer_email: params.customer_email.trim() }),
   });
 
   if (!session.url) {

@@ -28,7 +28,7 @@ import { stripeWebhookRoutes } from "./modules/stripe/stripe.routes.js";
 
 const app = express();
 
-// Trust proxy: use config (getTrustProxy) so IP client and rate-limit are correct behind Nginx/Render/Fly
+// Trust proxy: behind reverse proxy (Nginx/Render/Fly), set TRUST_PROXY=1 so req.ip = X-Forwarded-For and rate-limit (e.g. /stripe/webhook) uses real client IP; otherwise all requests appear from one proxy IP. In production, TRUST_PROXY is required by default (REQUIRE_TRUST_PROXY_IN_PROD). If you see 429 on webhook, check TRUST_PROXY=1 so the limiter sees per-client IP, not the proxy IP.
 if (getTrustProxy()) {
   app.set("trust proxy", 1);
 }
@@ -80,18 +80,23 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-// Webhook rate limit: applies to POST /stripe/webhook. Configure via RATE_LIMIT_WEBHOOK_MAX (default 1000/min) and RATE_LIMIT_WEBHOOK_WINDOW_MS (default 60000).
+// Webhook rate limit: key = req.ip. Behind a reverse proxy, req.ip is the proxy IP unless trust proxy is set (TRUST_PROXY=1); without it, all webhook requests share one IP and can hit 429. windowMs/max from env; safe defaults (1000/min) to avoid blocking Stripe.
 const webhookLimiter = rateLimit({
   windowMs: config.RATE_LIMIT_WEBHOOK_WINDOW_MS,
   max: config.RATE_LIMIT_WEBHOOK_MAX,
   message: { error: "Too many webhook requests" },
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req) => req.ip ?? "unknown",
   handler: (req, res) => {
     logger.warn("Webhook rate limit exceeded (429)", { requestId: req.requestId });
     res.status(429).json({ error: "Too many webhook requests" });
   },
 });
+
+// GUARD: Stripe webhook requires RAW BODY for signature verification (stripe.webhooks.constructEvent).
+// Mount /stripe BEFORE express.json() so POST /stripe/webhook gets req.body as Buffer (express.raw in stripe.routes).
+// Do not move express.json() above this line or webhook will receive parsed body and return 400.
 app.use("/stripe", webhookLimiter, stripeWebhookRoutes);
 
 app.use(express.json({ limit: "100kb" }));

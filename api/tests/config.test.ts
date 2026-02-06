@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { envBool, validateProductionConfig, type Config } from "../src/config/index.js";
+import { envBool, validateProductionConfig, getTrustProxy, type Config } from "../src/config/index.js";
 
 describe("config envBool", () => {
   it("parses true, 'true', '1' as true", () => {
@@ -20,6 +20,8 @@ describe("validateProductionConfig", () => {
     NODE_ENV: "production" as const,
     CORS_ORIGINS: "https://example.com",
     STRIPE_SECRET_KEY: "sk_live_xxxxxxxxxxxxxxxx",
+    STRIPE_SUCCESS_URL: "https://example.com/success",
+    STRIPE_CANCEL_URL: "https://example.com/cancel",
     STRIPE_WEBHOOK_SECRET: "whsec_abcdefghij1234567890",
     JWT_ACCESS_SECRET: "a".repeat(32),
     ENABLE_DEMO: undefined as boolean | undefined,
@@ -91,5 +93,11 @@ describe("validateProductionConfig", () => {
     expect(() =>
       validateProductionConfig({ ...baseProdConfig, NODE_ENV: "development", STRIPE_WEBHOOK_SECRET: "whsec_" } as Config)
     ).not.toThrow();
+  });
+});
+
+describe("getTrustProxy", () => {
+  it("returns a boolean (trust proxy drives req.ip and thus rate-limit key for /stripe/webhook)", () => {
+    expect(typeof getTrustProxy()).toBe("boolean");
   });
 });

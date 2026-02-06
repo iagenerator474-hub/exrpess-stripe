@@ -1,5 +1,14 @@
 # Checklist Go-Live
 
+## Go Live Stripe
+
+- [ ] **Webhook endpoint** : URL HTTPS de l’API (ex. `https://api.example.com/stripe/webhook`). Route montée **avant** `express.json()` pour garder le body brut (signature Stripe).
+- [ ] **Événements Stripe** : au minimum `checkout.session.completed`, `checkout.session.expired`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`. Pour les remboursements : `charge.refunded` et/ou `payment_intent.refunded`.
+- [ ] **STRIPE_WEBHOOK_SECRET (whsec_…)** : secret de signature du Dashboard (Webhooks → [endpoint] → Signing secret). En prod, pas de placeholder (crash au démarrage).
+- [ ] **STRIPE_SECRET_KEY** : clé live `sk_live_...` en prod (Stripe Dashboard → API keys). En dev/test : `sk_test_...`.
+- [ ] **STRIPE_SUCCESS_URL / STRIPE_CANCEL_URL** : URLs HTTPS en prod (redirection après paiement / annulation).
+- [ ] **TRUST_PROXY=1** si l’API est derrière un reverse proxy (Nginx, Render, Fly). Sinon le rate-limit webhook peut voir une seule IP (proxy) et renvoyer 429 à tort ; en cas de 429 webhook, vérifier TRUST_PROXY.
+
 ## Env obligatoires et nouveaux
 
 - [ ] Aucun `.env` committé ou dans le ZIP
