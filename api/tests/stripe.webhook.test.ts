@@ -95,6 +95,7 @@ describe("POST /stripe/webhook", () => {
       data: {
         object: {
           id: "cs_session_123",
+          mode: "payment",
           amount_total: 1000,
           currency: "eur",
           payment_status: "paid",
@@ -146,6 +147,7 @@ describe("POST /stripe/webhook", () => {
       data: {
         object: {
           id: "cs_500",
+          mode: "payment",
           amount_total: 1000,
           currency: "eur",
           payment_status: "paid",
@@ -175,6 +177,7 @@ describe("POST /stripe/webhook", () => {
       data: {
         object: {
           id: "cs_replay",
+          mode: "payment",
           amount_total: 1999,
           currency: "eur",
           payment_status: "paid",
@@ -229,6 +232,7 @@ describe("POST /stripe/webhook", () => {
       data: {
         object: {
           id: "cs_unpaid",
+          mode: "payment",
           amount_total: 1000,
           currency: "eur",
           payment_status: "unpaid",
@@ -339,6 +343,7 @@ describe("POST /stripe/webhook", () => {
       data: {
         object: {
           id: "cs_mismatch",
+          mode: "payment",
           amount_total: 999,
           currency: "eur",
           payment_status: "paid",
@@ -388,6 +393,198 @@ describe("POST /stripe/webhook", () => {
       }),
     });
     expect(prisma.order.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("on checkout.session.async_payment_succeeded with amount/currency OK updates Order to paid", async () => {
+    constructEventMock.mockReturnValueOnce({
+      id: "evt_async_ok",
+      type: "checkout.session.async_payment_succeeded",
+      data: {
+        object: {
+          id: "cs_async_ok",
+          mode: "payment",
+          amount_total: 1500,
+          currency: "eur",
+          payment_status: "paid",
+          metadata: { orderId: "order-async" },
+          client_reference_id: "order-async",
+        },
+      },
+    });
+    vi.mocked(prisma.order.findUnique).mockResolvedValue({ id: "order-async", amountCents: 1500, currency: "eur" });
+    vi.mocked(prisma.paymentEvent.create).mockResolvedValueOnce({
+      id: "pe-async-ok",
+      orderId: "order-async",
+      orphaned: false,
+      stripeEventId: "evt_async_ok",
+      type: "checkout.session.async_payment_succeeded",
+      payload: null,
+      receivedAt: new Date(),
+    });
+    vi.mocked(prisma.order.updateMany).mockResolvedValueOnce({ count: 1 });
+
+    const res = await request(app)
+      .post("/stripe/webhook")
+      .set("Content-Type", "application/json")
+      .set("stripe-signature", "v1,async_ok")
+      .send(rawBody);
+    expect(res.status).toBe(200);
+    expect(prisma.paymentEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        stripeEventId: "evt_async_ok",
+        type: "checkout.session.async_payment_succeeded",
+        orderId: "order-async",
+        orphaned: false,
+      }),
+    });
+    expect(prisma.order.updateMany).toHaveBeenCalledWith({
+      where: { id: "order-async", status: { not: "paid" } },
+      data: expect.objectContaining({ status: "paid", paidAt: expect.any(Date) }),
+    });
+  });
+
+  it("on checkout.session.async_payment_failed updates Order to failed", async () => {
+    constructEventMock.mockReturnValueOnce({
+      id: "evt_async_fail",
+      type: "checkout.session.async_payment_failed",
+      data: {
+        object: {
+          id: "cs_async_fail",
+          metadata: { orderId: "order-async-fail" },
+          client_reference_id: "order-async-fail",
+        },
+      },
+    });
+    vi.mocked(prisma.order.findUnique).mockResolvedValue({ id: "order-async-fail" });
+    vi.mocked(prisma.paymentEvent.create).mockResolvedValueOnce({
+      id: "pe-async-fail",
+      orderId: "order-async-fail",
+      orphaned: false,
+      stripeEventId: "evt_async_fail",
+      type: "checkout.session.async_payment_failed",
+      payload: null,
+      receivedAt: new Date(),
+    });
+    vi.mocked(prisma.order.updateMany).mockResolvedValueOnce({ count: 1 });
+
+    const res = await request(app)
+      .post("/stripe/webhook")
+      .set("Content-Type", "application/json")
+      .set("stripe-signature", "v1,async_fail")
+      .send(rawBody);
+    expect(res.status).toBe(200);
+    expect(prisma.paymentEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        stripeEventId: "evt_async_fail",
+        type: "checkout.session.async_payment_failed",
+        orderId: "order-async-fail",
+        orphaned: false,
+      }),
+    });
+    expect(prisma.order.updateMany).toHaveBeenCalledWith({
+      where: { id: "order-async-fail", status: "pending" },
+      data: { status: "failed" },
+    });
+  });
+
+  it("on checkout.session.async_payment_succeeded amount/currency mismatch stores orphaned and does not update Order", async () => {
+    constructEventMock.mockReturnValueOnce({
+      id: "evt_async_mismatch",
+      type: "checkout.session.async_payment_succeeded",
+      data: {
+        object: {
+          id: "cs_async_mismatch",
+          mode: "payment",
+          amount_total: 888,
+          currency: "usd",
+          payment_status: "paid",
+          metadata: { orderId: "order-async-m" },
+          client_reference_id: "order-async-m",
+        },
+      },
+    });
+    vi.mocked(prisma.order.findUnique).mockResolvedValue({ id: "order-async-m", amountCents: 1000, currency: "eur" });
+    vi.mocked(prisma.paymentEvent.create).mockResolvedValueOnce({
+      id: "pe-async-m",
+      orderId: "order-async-m",
+      orphaned: true,
+      stripeEventId: "evt_async_mismatch",
+      type: "checkout.session.async_payment_succeeded",
+      payload: null,
+      receivedAt: new Date(),
+    });
+
+    const res = await request(app)
+      .post("/stripe/webhook")
+      .set("Content-Type", "application/json")
+      .set("stripe-signature", "v1,async_mismatch")
+      .send(rawBody);
+    expect(res.status).toBe(200);
+    expect(prisma.paymentEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        stripeEventId: "evt_async_mismatch",
+        orderId: "order-async-m",
+        orphaned: true,
+      }),
+    });
+    expect(prisma.order.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("duplicate stripeEventId returns 200 and idempotent re-apply does not double-mutate Order", async () => {
+    const dupEvent = {
+      id: "evt_dup",
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: "cs_dup",
+          mode: "payment",
+          amount_total: 777,
+          currency: "eur",
+          payment_status: "paid",
+          metadata: { orderId: "order-dup" },
+          client_reference_id: "order-dup",
+        },
+      },
+    };
+    constructEventMock.mockReturnValue(dupEvent);
+    vi.mocked(prisma.order.findUnique).mockResolvedValue({ id: "order-dup", amountCents: 777, currency: "eur" });
+    vi.mocked(prisma.paymentEvent.create)
+      .mockResolvedValueOnce({
+        id: "pe-dup-1",
+        orderId: "order-dup",
+        orphaned: false,
+        stripeEventId: "evt_dup",
+        type: "checkout.session.completed",
+        payload: null,
+        receivedAt: new Date(),
+      })
+      .mockRejectedValueOnce({ code: "P2002" });
+    vi.mocked(prisma.paymentEvent.findUnique).mockResolvedValue({ orphaned: false });
+    vi.mocked(prisma.order.updateMany).mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 });
+
+    const payload = Buffer.from(JSON.stringify(dupEvent));
+    const r1 = await request(app)
+      .post("/stripe/webhook")
+      .set("Content-Type", "application/json")
+      .set("stripe-signature", "v1,dup1")
+      .send(payload);
+    const r2 = await request(app)
+      .post("/stripe/webhook")
+      .set("Content-Type", "application/json")
+      .set("stripe-signature", "v1,dup2")
+      .send(payload);
+    expect(r1.status).toBe(200);
+    expect(r2.status).toBe(200);
+    expect(prisma.paymentEvent.create).toHaveBeenCalledTimes(2);
+    expect(prisma.order.updateMany).toHaveBeenCalledTimes(2);
+    expect(prisma.order.updateMany).toHaveBeenNthCalledWith(1, {
+      where: { id: "order-dup", status: { not: "paid" } },
+      data: expect.objectContaining({ status: "paid" }),
+    });
+    expect(prisma.order.updateMany).toHaveBeenNthCalledWith(2, {
+      where: { id: "order-dup", status: { not: "paid" } },
+      data: expect.objectContaining({ status: "paid" }),
+    });
   });
 
   it("on charge.refunded full refund updates Order to refunded", async () => {
@@ -502,6 +699,7 @@ describe("POST /stripe/webhook", () => {
       data: {
         object: {
           id: "cs_tx",
+          mode: "payment",
           amount_total: 500,
           currency: "eur",
           payment_status: "paid",
@@ -548,6 +746,7 @@ describe("POST /stripe/webhook", () => {
       data: {
         object: {
           id: "cs_retry",
+          mode: "payment",
           amount_total: 999,
           currency: "eur",
           payment_status: "paid",
