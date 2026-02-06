@@ -119,23 +119,19 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
         if (!orderRow) {
           orderId = null;
           orphaned = true;
-        } else {
-          const amountMatch = session.amount_total != null && session.amount_total === orderRow.amountCents;
-          const currencyMatch =
-            (session.currency ?? "").toLowerCase() === (orderRow.currency ?? "").toLowerCase();
-          if (!amountMatch || !currencyMatch) {
-            logger.warn("checkout.session.completed amount/currency mismatch, order not marked paid", {
-              requestId,
-              stripeEventId,
-              stripeSessionId: sessionId,
-              orderId: orderIdFromEvent,
-              sessionAmount: session.amount_total,
-              sessionCurrency: session.currency,
-              orderAmountCents: orderRow.amountCents,
-              orderCurrency: orderRow.currency,
-            });
-            orphaned = true;
-          }
+        } else if (!sessionOrderSanityCheck(session, orderRow)) {
+          logger.warn("checkout.session.completed sanity check failed, order not marked paid", {
+            requestId,
+            stripeEventId,
+            stripeSessionId: sessionId,
+            orderId: orderIdFromEvent,
+            sessionMode: session.mode,
+            sessionAmount: session.amount_total,
+            sessionCurrency: session.currency,
+            orderAmountCents: orderRow.amountCents,
+            orderCurrency: orderRow.currency,
+          });
+          orphaned = true;
         }
       }
 
