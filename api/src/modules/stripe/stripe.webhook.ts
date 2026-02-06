@@ -144,9 +144,18 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
             select: { orphaned: true },
           });
           if (orderIdFromEvent && sessionId && existing && !existing.orphaned) {
+            const paymentIntentId =
+              typeof session.payment_intent === "string"
+                ? session.payment_intent
+                : (session.payment_intent as Stripe.PaymentIntent)?.id ?? null;
             await prisma.order.updateMany({
               where: { id: orderIdFromEvent, status: { not: "paid" } },
-              data: { stripeSessionId: sessionId, status: "paid", paidAt: new Date() },
+              data: {
+                stripeSessionId: sessionId,
+                ...(paymentIntentId && { stripePaymentIntentId: paymentIntentId }),
+                status: "paid",
+                paidAt: new Date(),
+              },
             });
           }
           res.status(200).json({ received: true });
@@ -162,9 +171,18 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
       }
 
       if (orderIdFromEvent && !orphaned) {
+        const paymentIntentId =
+          typeof session.payment_intent === "string"
+            ? session.payment_intent
+            : (session.payment_intent as Stripe.PaymentIntent)?.id ?? null;
         const updateResult = await prisma.order.updateMany({
           where: { id: orderIdFromEvent, status: { not: "paid" } },
-          data: { stripeSessionId: sessionId, status: "paid", paidAt: new Date() },
+          data: {
+            stripeSessionId: sessionId,
+            ...(paymentIntentId && { stripePaymentIntentId: paymentIntentId }),
+            status: "paid",
+            paidAt: new Date(),
+          },
         });
         logger.info("Stripe webhook outcome", {
           requestId,
@@ -180,6 +198,186 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
           stripeSessionId: sessionId,
           orderId: orderIdFromEvent,
         });
+      }
+    } else if (event.type === "charge.refunded") {
+      const charge = event.data.object as Stripe.Charge;
+      const paymentIntentId = typeof charge.payment_intent === "string" ? charge.payment_intent : charge.payment_intent?.id ?? null;
+      const amount = charge.amount ?? 0;
+      const amountRefunded = charge.amount_refunded ?? 0;
+      const isFullRefund = amount > 0 && amountRefunded >= amount;
+
+      const payloadSnapshot: Record<string, unknown> = {
+        stripeEventId: event.id,
+        type: event.type,
+        chargeId: charge.id,
+        paymentIntentId: paymentIntentId ?? undefined,
+        amount,
+        amount_refunded: amountRefunded,
+      };
+
+      let orderId: string | null = null;
+      let orphaned = true;
+      if (paymentIntentId) {
+        const orderRow = await prisma.order.findFirst({
+          where: { stripePaymentIntentId: paymentIntentId },
+          select: { id: true },
+        });
+        if (orderRow) {
+          orderId = orderRow.id;
+          orphaned = false;
+        }
+      }
+      if (orphaned) {
+        logger.warn("charge.refunded order not found by payment_intent", {
+          requestId,
+          stripeEventId,
+          chargeId: charge.id,
+          paymentIntentId: paymentIntentId ?? undefined,
+        });
+      }
+
+      try {
+        await prisma.paymentEvent.create({
+          data: {
+            stripeEventId,
+            type: event.type,
+            orderId,
+            orphaned,
+            payload: payloadSnapshot,
+          },
+        });
+      } catch (createErr: unknown) {
+        const code = createErr && typeof createErr === "object" && "code" in createErr ? (createErr as { code?: string }).code : undefined;
+        if (code === "P2002") {
+          const existing = await prisma.paymentEvent.findUnique({
+            where: { stripeEventId },
+            select: { orphaned: true, orderId: true },
+          });
+          if (existing && existing.orderId && !existing.orphaned && isFullRefund) {
+            await prisma.order.updateMany({
+              where: { id: existing.orderId, status: "paid" },
+              data: { status: "refunded" },
+            });
+          }
+          res.status(200).json({ received: true });
+          return;
+        }
+        if (config.NODE_ENV === "production") {
+          logger.error("Webhook persist failed", { requestId, stripeEventId, errorCode: "persist_failed" });
+        } else {
+          logger.error("Webhook persist failed", { requestId, stripeEventId, error: String(createErr) });
+        }
+        res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
+        return;
+      }
+
+      if (orderId && !orphaned && isFullRefund) {
+        const updateResult = await prisma.order.updateMany({
+          where: { id: orderId, status: "paid" },
+          data: { status: "refunded" },
+        });
+        logger.info("Stripe webhook outcome", {
+          requestId,
+          stripeEventId,
+          orderId,
+          outcome: updateResult.count > 0 ? "refunded" : "noop",
+        });
+      } else if (orphaned) {
+        logger.warn("charge.refunded stored as orphaned", { requestId, stripeEventId, chargeId: charge.id });
+      }
+    } else if (event.type === "payment_intent.refunded") {
+      const pi = event.data.object as Stripe.PaymentIntent;
+      const amountReceived = pi.amount_received ?? 0;
+      const amountRefunded = pi.amount_refunded ?? 0;
+      const isFullRefund = amountReceived > 0 && amountRefunded >= amountReceived;
+
+      const payloadSnapshot: Record<string, unknown> = {
+        stripeEventId: event.id,
+        type: event.type,
+        paymentIntentId: pi.id,
+        amount_received: amountReceived,
+        amount_refunded: amountRefunded,
+      };
+
+      let orderId: string | null = (pi.metadata?.orderId as string) ?? null;
+      let orphaned = true;
+      if (orderId) {
+        const orderRow = await prisma.order.findUnique({
+          where: { id: orderId },
+          select: { id: true },
+        });
+        if (!orderRow) {
+          orderId = null;
+        } else {
+          orphaned = false;
+        }
+      }
+      if (orphaned && !orderId) {
+        const orderByPi = await prisma.order.findFirst({
+          where: { stripePaymentIntentId: pi.id },
+          select: { id: true },
+        });
+        if (orderByPi) {
+          orderId = orderByPi.id;
+          orphaned = false;
+        }
+      }
+      if (orphaned) {
+        logger.warn("payment_intent.refunded order not found", {
+          requestId,
+          stripeEventId,
+          paymentIntentId: pi.id,
+        });
+      }
+
+      try {
+        await prisma.paymentEvent.create({
+          data: {
+            stripeEventId,
+            type: event.type,
+            orderId,
+            orphaned,
+            payload: payloadSnapshot,
+          },
+        });
+      } catch (createErr: unknown) {
+        const code = createErr && typeof createErr === "object" && "code" in createErr ? (createErr as { code?: string }).code : undefined;
+        if (code === "P2002") {
+          const existing = await prisma.paymentEvent.findUnique({
+            where: { stripeEventId },
+            select: { orphaned: true, orderId: true },
+          });
+          if (existing && existing.orderId && !existing.orphaned && isFullRefund) {
+            await prisma.order.updateMany({
+              where: { id: existing.orderId, status: "paid" },
+              data: { status: "refunded" },
+            });
+          }
+          res.status(200).json({ received: true });
+          return;
+        }
+        if (config.NODE_ENV === "production") {
+          logger.error("Webhook persist failed", { requestId, stripeEventId, errorCode: "persist_failed" });
+        } else {
+          logger.error("Webhook persist failed", { requestId, stripeEventId, error: String(createErr) });
+        }
+        res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
+        return;
+      }
+
+      if (orderId && !orphaned && isFullRefund) {
+        const updateResult = await prisma.order.updateMany({
+          where: { id: orderId, status: "paid" },
+          data: { status: "refunded" },
+        });
+        logger.info("Stripe webhook outcome", {
+          requestId,
+          stripeEventId,
+          orderId,
+          outcome: updateResult.count > 0 ? "refunded" : "noop",
+        });
+      } else if (orphaned) {
+        logger.warn("payment_intent.refunded stored as orphaned", { requestId, stripeEventId, paymentIntentId: pi.id });
       }
     } else {
       try {

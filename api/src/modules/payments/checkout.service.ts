@@ -1,5 +1,6 @@
 import { prisma } from "../../lib/prisma.js";
 import { logger } from "../../lib/logger.js";
+import { config } from "../../config/index.js";
 import * as stripeService from "../stripe/stripe.service.js";
 import { AppError } from "../../middleware/errorHandler.js";
 
@@ -67,7 +68,7 @@ export async function createCheckoutSession(
       stripeError: stripeMessage,
     });
     throw new AppError(
-      process.env.NODE_ENV === "development"
+      config.NODE_ENV === "development"
         ? `Payment setup failed: ${stripeMessage}`
         : "Payment setup failed",
       502,

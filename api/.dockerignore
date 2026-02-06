@@ -1,0 +1,27 @@
+# Dependencies and build artifacts (rebuilt in stages)
+node_modules
+dist
+npm-debug.log*
+
+# Env and secrets (must be provided at run time)
+.env
+.env.*
+!.env.example
+
+# Tests and dev tooling (not needed in image)
+tests
+coverage
+*.test.ts
+*.spec.ts
+vitest.config.ts
+tsconfig.vitest.json
+eslint.config.js
+
+# Git and IDE
+.git
+.gitignore
+.dockerignore
+
+# Docs and audits (optional: remove to shrink image)
+# docs
+# *.md

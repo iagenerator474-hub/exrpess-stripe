@@ -30,8 +30,7 @@ router.post(
 
       const parsed = checkoutSessionBodySchema.safeParse(req.body);
       if (!parsed.success) {
-        const msg = parsed.error.errors.map((e) => e.message).join("; ") || "Validation failed";
-        throw new AppError(msg, 400, "VALIDATION_ERROR");
+        throw new AppError("Invalid request body", 400, "VALIDATION_ERROR");
       }
 
       const { productId } = parsed.data;

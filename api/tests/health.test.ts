@@ -3,9 +3,9 @@ import request from "supertest";
 import app from "../src/app.js";
 
 describe("GET /health", () => {
-  it("returns 200 when DB up, 503 when DB down; always includes status, env, db", async () => {
+  it("returns 200 when DB up, 503 when DB down; always includes status and db (env only if HEALTH_EXPOSE_ENV)", async () => {
     const res = await request(app).get("/health");
-    expect(res.body).toHaveProperty("env");
+    expect(res.body).toHaveProperty("status");
     expect(res.body).toHaveProperty("db");
     if (res.status === 200) {
       expect(res.body).toHaveProperty("status", "ok");

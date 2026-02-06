@@ -37,15 +37,16 @@ model RefreshToken {
 }
 
 model Order {
-  id              String    @id @default(cuid())
-  userId          String    @map("user_id")
-  stripeSessionId String?   @unique @map("stripe_session_id")
-  amountCents     Int       @map("amount_cents")
-  currency        String    @default("eur")
-  status          String    @default("pending") // pending | paid | failed | refunded
-  paidAt          DateTime? @map("paid_at")
-  createdAt       DateTime  @default(now()) @map("created_at")
-  updatedAt       DateTime  @updatedAt @map("updated_at")
+  id                   String    @id @default(cuid())
+  userId               String    @map("user_id")
+  stripeSessionId      String?   @unique @map("stripe_session_id")
+  stripePaymentIntentId String?  @map("stripe_payment_intent_id") // for refund events (charge.refunded / payment_intent.refunded)
+  amountCents          Int       @map("amount_cents")
+  currency             String    @default("eur")
+  status               String    @default("pending") // pending | paid | failed | refunded
+  paidAt               DateTime? @map("paid_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
 
   user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
   paymentEvents PaymentEvent[]

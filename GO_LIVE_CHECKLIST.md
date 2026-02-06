@@ -3,7 +3,7 @@
 ## Env obligatoires et nouveaux
 
 - [ ] Aucun `.env` committé ou dans le ZIP
-- [ ] `DATABASE_URL`, `JWT_ACCESS_SECRET` définis (min 16 car.)
+- [ ] `DATABASE_URL`, `JWT_ACCESS_SECRET` définis (min 16 car. ; **en prod min 32 car.**, sinon crash au démarrage)
 - [ ] `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` (prod), `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL` définis
 - [ ] `CORS_ORIGINS` = liste explicite (pas `*`)
 - [ ] `NODE_ENV=production`
@@ -34,11 +34,16 @@
   - Commande : `PURGE_CONFIRM=YES npx tsx src/scripts/purgePaymentEvents.ts erase <userId>`
   - Exemple : `PURGE_CONFIRM=YES npm run purge:payment-events -- erase user_abc123`
 
-## Déploiement
+## Déploiement (checklist GO-LIVE)
 
-- [ ] Webhook Stripe prod : URL HTTPS, événement `checkout.session.completed`, signing secret en env (distinct du local)
+- [ ] **TRUST_PROXY=1** si l’API est derrière un reverse proxy (Fly.io, Render, Nginx, etc.) — requis pour IP client et rate-limit corrects.
+- [ ] **STRIPE_WEBHOOK_SECRET** : valeur valide (secret du Dashboard Stripe pour l’URL prod). En prod, un placeholder ou valeur vide empêche le démarrage.
+- [ ] **ENABLE_DEMO** : désactivé en prod (doit rester false ; en prod, ENABLE_DEMO=true fait crasher l’app au démarrage).
+- [ ] **STRIPE_API_VERSION** : alignée avec la version configurée dans le Stripe Dashboard (éviter erreurs de version d’API).
+- [ ] **Rate limit webhook** : 100 req/min par défaut ; en cas de burst Stripe, surveiller les 429 (log « Webhook rate limit exceeded ») et ajuster si besoin. Voir api/DEPLOYMENT_CHECKLIST.md.
+- [ ] Webhook Stripe prod : URL HTTPS. Événements obligatoires : `checkout.session.completed`. Refunds : `charge.refunded` et/ou `payment_intent.refunded` (sinon Order ne passe jamais à "refunded"). Signing secret en env (distinct du local).
 - [ ] Cookies : en prod HTTPS, `COOKIE_SECURE` true (défaut) ; `COOKIE_DOMAIN` si front sous-domaine
-- [ ] Entrypoint / démarrage : `prisma migrate deploy` avant `node dist/index.js`
+- [ ] Entrypoint / démarrage : **`npx prisma migrate deploy`** avant `node dist/index.js`. La migration **stripePaymentIntentId** (colonne `Order.stripe_payment_intent_id`) doit être appliquée pour les refunds.
 - [ ] Healthcheck plateforme sur `GET /ready` (200 = prêt)
 - [ ] Paiement test de bout en bout : checkout avec `productId` → paiement → Order en DB en `paid`
 - [ ] Rejeu webhook : idempotence OK (un seul traitement par event.id)

@@ -1,3 +1,6 @@
+import { config } from "../config/index.js";
+
+/** Rule: never log PII (email, name, etc.) or secrets (tokens, auth headers, request body) in debug or any level. */
 type LogLevel = "info" | "warn" | "error" | "debug";
 
 interface LogPayload {
@@ -25,7 +28,7 @@ export const logger = {
     console.error(formatPayload({ level: "error", message, ...meta }));
   },
   debug(message: string, meta?: Record<string, unknown>): void {
-    if (process.env.NODE_ENV !== "production") {
+    if (config.NODE_ENV !== "production") {
       console.debug(formatPayload({ level: "debug", message, ...meta }));
     }
   },

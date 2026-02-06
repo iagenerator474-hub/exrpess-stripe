@@ -43,7 +43,7 @@ export function errorHandler(
     ...(err instanceof Error && shouldLogStack(statusCode, isAppError) && { stack: err.stack }),
   });
 
-  const isProduction = process.env.NODE_ENV === "production";
+  const isProduction = config.NODE_ENV === "production";
   let clientMessage: string;
   let body: Record<string, unknown>;
 
@@ -65,7 +65,7 @@ export function errorHandler(
     }
   } else {
     clientMessage =
-      isAppError || process.env.NODE_ENV === "development"
+      isAppError || config.NODE_ENV === "development"
         ? serverMessage
         : "Internal server error";
     body = {

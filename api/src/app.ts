@@ -10,6 +10,7 @@ import rateLimit from "express-rate-limit";
 import { requestId, errorHandler, AppError } from "./middleware/index.js";
 import { getCorsOrigins, getTrustProxy } from "./config/index.js";
 import { config } from "./config/index.js";
+import { logger } from "./lib/logger.js";
 
 function isLocalhostOrigin(origin: string): boolean {
   try {
@@ -27,7 +28,7 @@ import { stripeWebhookRoutes } from "./modules/stripe/stripe.routes.js";
 
 const app = express();
 
-// Trust proxy: required behind Nginx/Render/Fly for correct client IP and cookies
+// Trust proxy: use config (getTrustProxy) so IP client and rate-limit are correct behind Nginx/Render/Fly
 if (getTrustProxy()) {
   app.set("trust proxy", 1);
 }
@@ -85,6 +86,10 @@ const webhookLimiter = rateLimit({
   message: { error: "Too many webhook requests" },
   standardHeaders: true,
   legacyHeaders: false,
+  handler: (req, res) => {
+    logger.warn("Webhook rate limit exceeded (429)", { requestId: req.requestId });
+    res.status(429).json({ error: "Too many webhook requests" });
+  },
 });
 app.use("/stripe", webhookLimiter, stripeWebhookRoutes);
 

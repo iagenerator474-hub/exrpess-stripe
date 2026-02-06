@@ -58,7 +58,7 @@ Si Docker n’est pas disponible (erreur `dockerDesktopLinuxEngine` / « Le fich
 3. Webhook : signature vérifiée → persist PaymentEvent → si doublon (P2002) ACK 200 ; sinon mise à jour Order puis ACK 200. En cas d’erreur DB → 500 (Stripe retente). Rejeu du même event = 200 sans retraitement. **Seules les sessions avec `payment_status === "paid"`** déclenchent le passage de la commande en paid ; `unpaid` / `no_payment_required` sont enregistrées en orphan (audit) et la commande reste dans son statut actuel (ex. `created`).
 
 **Local** : `stripe listen --forward-to http://localhost:3000/stripe/webhook` ; mettre le `whsec_…` dans `.env` (secret local ≠ prod).  
-**Prod** : Dashboard → Webhooks → URL HTTPS, événement `checkout.session.completed`, signing secret en env.
+**Prod** : Dashboard → Webhooks → URL HTTPS, événements `checkout.session.completed` (et `charge.refunded` / `payment_intent.refunded` pour les remboursements). ENABLE_DEMO doit rester false en prod (sinon crash au démarrage). Checklist détaillée : [api/DEPLOYMENT_CHECKLIST.md](api/DEPLOYMENT_CHECKLIST.md). Voir aussi [GO_LIVE_CHECKLIST.md](GO_LIVE_CHECKLIST.md).
 
 ## Security notes
 
@@ -69,14 +69,14 @@ Si Docker n’est pas disponible (erreur `dockerDesktopLinuxEngine` / « Le fich
 
 ## Logs & rétention
 
-- **Loggé** : `requestId`, `stripeEventId`, `stripeSessionId`, `orderId` (référence), type d’event, codes d’erreur en prod (`persist_failed`, `processing_failed`). Pas de payload complet ni de body webhook.
-- **Jamais loggé** : secrets (clés Stripe, JWT), headers/cookies/body des requêtes. En prod, le détail des erreurs DB n’est pas loggé (code générique uniquement).
-- **Corrélation** : chaque requête a un `requestId` (UUID) ; envoyé au client via le header `x-request-id` et, pour les erreurs API, dans le body JSON. Permet de relier une requête aux logs.
-- **Rétention** : à configurer côté hébergeur ou centralisation (ex. 14–30 jours). Voir [GO_LIVE_CHECKLIST.md](GO_LIVE_CHECKLIST.md) section Privacy & retention.
+- **Champs safe à logger** (corrélation / investigation) : `requestId`, `stripeEventId`, `stripeSessionId`, `orderId` (référence), type d’event, codes d’erreur en prod (`persist_failed`, `processing_failed`). Pas de payload complet ni de body webhook.
+- **Champs interdits** : email, nom, cookies, tokens (JWT/refresh), headers d’auth, body des requêtes, clés Stripe, toute donnée permettant d’identifier une personne ou une session.
+- **Corrélation** : chaque requête a un `requestId` (UUID) ; envoyé au client via le header `x-request-id` et, pour les erreurs API, dans le body JSON. Utiliser ce `requestId` pour l’investigation (filtrer les logs par requestId).
+- **Rétention** : configurer côté hébergeur ou centralisation logs une rétention de **14–30 jours** ; conserver les logs contenant `requestId` pour permettre le suivi des incidents. Détails ops : [api/OPS_RUNBOOK.md](api/OPS_RUNBOOK.md) § Ops logs. Voir [GO_LIVE_CHECKLIST.md](GO_LIVE_CHECKLIST.md) section Privacy & retention.
 
 ## Env vars
 
-Voir **`api/.env.example`**. Obligatoires : `DATABASE_URL`, `JWT_ACCESS_SECRET`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL`, `CORS_ORIGINS` (prod : liste explicite). Optionnel : `COOKIE_DOMAIN`, `COOKIE_SAMESITE`, `STRIPE_API_VERSION`, `ENABLE_DEMO` (prod).
+Voir **`api/.env.example`**. Obligatoires : `DATABASE_URL`, `JWT_ACCESS_SECRET` (prod : min 32 car.), `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL`, `CORS_ORIGINS` (prod : liste explicite). Optionnel : `COOKIE_DOMAIN`, `COOKIE_SAMESITE`, `STRIPE_API_VERSION` (doit être alignée avec le Stripe Dashboard), `ENABLE_DEMO` (prod : doit rester false), `HEALTH_EXPOSE_ENV` (défaut false : ne pas renvoyer env dans GET /health).
 
 ### Front sur autre domaine (cross-site)
 

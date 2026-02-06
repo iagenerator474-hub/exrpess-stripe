@@ -15,11 +15,12 @@ vi.mock("../src/modules/stripe/stripe.service.js", async (importOriginal) => {
 
 vi.mock("../src/lib/prisma.js", () => {
   const orderFindUnique = vi.fn();
+  const orderFindFirst = vi.fn();
   const orderUpdateMany = vi.fn();
   const paymentEventCreate = vi.fn();
   const paymentEventFindUnique = vi.fn();
   const prismaInstance = {
-    order: { findUnique: orderFindUnique, updateMany: orderUpdateMany },
+    order: { findUnique: orderFindUnique, findFirst: orderFindFirst, updateMany: orderUpdateMany },
     paymentEvent: { create: paymentEventCreate, findUnique: paymentEventFindUnique },
   };
   return { prisma: prismaInstance };
@@ -33,6 +34,7 @@ describe("POST /stripe/webhook", () => {
   beforeEach(() => {
     constructEventMock.mockReset();
     vi.mocked(prisma.order.findUnique).mockReset();
+    vi.mocked(prisma.order.findFirst).mockReset();
     vi.mocked(prisma.order.updateMany).mockReset();
     vi.mocked(prisma.paymentEvent.create).mockReset();
     vi.mocked(prisma.paymentEvent.findUnique).mockReset();
@@ -388,6 +390,111 @@ describe("POST /stripe/webhook", () => {
     expect(prisma.order.updateMany).not.toHaveBeenCalled();
   });
 
+  it("on charge.refunded full refund updates Order to refunded", async () => {
+    constructEventMock.mockReturnValueOnce({
+      id: "evt_charge_refund",
+      type: "charge.refunded",
+      data: {
+        object: {
+          id: "ch_1",
+          payment_intent: "pi_1",
+          amount: 1000,
+          amount_refunded: 1000,
+        },
+      },
+    });
+    vi.mocked(prisma.order.findFirst).mockResolvedValue({ id: "order-1" });
+    vi.mocked(prisma.order.updateMany).mockResolvedValue({ count: 1 });
+    vi.mocked(prisma.paymentEvent.create).mockResolvedValueOnce({
+      id: "pe-refund",
+      orderId: "order-1",
+      orphaned: false,
+      stripeEventId: "evt_charge_refund",
+      type: "charge.refunded",
+      payload: null,
+      receivedAt: new Date(),
+    });
+
+    const res = await request(app)
+      .post("/stripe/webhook")
+      .set("Content-Type", "application/json")
+      .set("stripe-signature", "v1,refund")
+      .send(
+        Buffer.from(
+          JSON.stringify({
+            id: "evt_charge_refund",
+            type: "charge.refunded",
+            data: { object: { id: "ch_1", payment_intent: "pi_1", amount: 1000, amount_refunded: 1000 } },
+          })
+        )
+      );
+    expect(res.status).toBe(200);
+    expect(prisma.paymentEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        stripeEventId: "evt_charge_refund",
+        type: "charge.refunded",
+        orderId: "order-1",
+        orphaned: false,
+      }),
+    });
+    expect(prisma.order.updateMany).toHaveBeenCalledWith({
+      where: { id: "order-1", status: "paid" },
+      data: { status: "refunded" },
+    });
+  });
+
+  it("on payment_intent.refunded full refund updates Order to refunded", async () => {
+    constructEventMock.mockReturnValueOnce({
+      id: "evt_pi_refund",
+      type: "payment_intent.refunded",
+      data: {
+        object: {
+          id: "pi_2",
+          metadata: { orderId: "order-2" },
+          amount_received: 2000,
+          amount_refunded: 2000,
+        },
+      },
+    });
+    vi.mocked(prisma.order.findUnique).mockResolvedValue({ id: "order-2" });
+    vi.mocked(prisma.order.updateMany).mockResolvedValue({ count: 1 });
+    vi.mocked(prisma.paymentEvent.create).mockResolvedValueOnce({
+      id: "pe-pi-refund",
+      orderId: "order-2",
+      orphaned: false,
+      stripeEventId: "evt_pi_refund",
+      type: "payment_intent.refunded",
+      payload: null,
+      receivedAt: new Date(),
+    });
+
+    const res = await request(app)
+      .post("/stripe/webhook")
+      .set("Content-Type", "application/json")
+      .set("stripe-signature", "v1,pi_refund")
+      .send(
+        Buffer.from(
+          JSON.stringify({
+            id: "evt_pi_refund",
+            type: "payment_intent.refunded",
+            data: {
+              object: {
+                id: "pi_2",
+                metadata: { orderId: "order-2" },
+                amount_received: 2000,
+                amount_refunded: 2000,
+              },
+            },
+          })
+        )
+      );
+    expect(res.status).toBe(200);
+    expect(prisma.order.updateMany).toHaveBeenCalledWith({
+      where: { id: "order-2", status: "paid" },
+      data: { status: "refunded" },
+    });
+  });
+
   it("durable: create PaymentEvent then updateMany Order before ACK 200", async () => {
     constructEventMock.mockReturnValueOnce({
       id: "evt_tx",
@@ -432,5 +539,64 @@ describe("POST /stripe/webhook", () => {
 
     expect(prisma.paymentEvent.create).toHaveBeenCalled();
     expect(prisma.order.updateMany).toHaveBeenCalled();
+  });
+
+  it("retry after create succeeds and updateMany fails: P2002 branch applies updateMany and returns 200", async () => {
+    const sameEvent = {
+      id: "evt_retry",
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: "cs_retry",
+          amount_total: 999,
+          currency: "eur",
+          payment_status: "paid",
+          metadata: { orderId: "order-retry" },
+          client_reference_id: "order-retry",
+        },
+      },
+    };
+    const payload = Buffer.from(JSON.stringify(sameEvent));
+    constructEventMock.mockReturnValue(sameEvent);
+    vi.mocked(prisma.order.findUnique).mockResolvedValue({ id: "order-retry", amountCents: 999, currency: "eur" });
+    vi.mocked(prisma.paymentEvent.create)
+      .mockResolvedValueOnce({
+        id: "pe-retry",
+        orderId: "order-retry",
+        orphaned: false,
+        stripeEventId: "evt_retry",
+        type: "checkout.session.completed",
+        payload: null,
+        receivedAt: new Date(),
+      })
+      .mockRejectedValueOnce({ code: "P2002" });
+    vi.mocked(prisma.paymentEvent.findUnique).mockResolvedValueOnce({ orphaned: false });
+    vi.mocked(prisma.order.updateMany)
+      .mockRejectedValueOnce(new Error("DB timeout"))
+      .mockResolvedValueOnce({ count: 1 });
+
+    const res1 = await request(app)
+      .post("/stripe/webhook")
+      .set("Content-Type", "application/json")
+      .set("stripe-signature", "v1,retry1")
+      .send(payload);
+    expect(res1.status).toBe(500);
+
+    const res2 = await request(app)
+      .post("/stripe/webhook")
+      .set("Content-Type", "application/json")
+      .set("stripe-signature", "v1,retry2")
+      .send(payload);
+    expect(res2.status).toBe(200);
+    expect(prisma.paymentEvent.create).toHaveBeenCalledTimes(2);
+    expect(prisma.paymentEvent.findUnique).toHaveBeenCalledWith({
+      where: { stripeEventId: "evt_retry" },
+      select: { orphaned: true },
+    });
+    expect(prisma.order.updateMany).toHaveBeenCalledTimes(2);
+    expect(prisma.order.updateMany).toHaveBeenLastCalledWith({
+      where: { id: "order-retry", status: { not: "paid" } },
+      data: expect.objectContaining({ status: "paid", stripeSessionId: "cs_retry" }),
+    });
   });
 });

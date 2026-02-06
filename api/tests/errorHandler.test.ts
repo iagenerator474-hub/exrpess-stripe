@@ -6,6 +6,20 @@ import { AppError } from "../src/middleware/errorHandler.js";
 
 vi.mock("../src/modules/auth/auth.service.js");
 
+// So that errorHandler (which uses config.NODE_ENV) sees production when process.env.NODE_ENV is set in tests
+vi.mock("../src/config/index.js", async (importOriginal) => {
+  const actual = (await importOriginal()) as { config: Record<string, unknown>; [k: string]: unknown };
+  return {
+    ...actual,
+    config: new Proxy(actual.config as object, {
+      get(t: Record<string, unknown>, p: string) {
+        if (p === "NODE_ENV") return process.env.NODE_ENV ?? t.NODE_ENV;
+        return t[p];
+      },
+    }),
+  };
+});
+
 import app from "../src/app.js";
 
 describe("Error handler", () => {
