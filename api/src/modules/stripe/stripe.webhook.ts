@@ -25,6 +25,20 @@ function minimalPayload(event: Stripe.Event): Record<string, unknown> {
   };
 }
 
+/** Sanity checks before mutating Order from a checkout session. Returns false if session is incoherent with order. */
+function sessionOrderSanityCheck(
+  session: Stripe.Checkout.Session,
+  orderRow: { id: string; amountCents: number; currency: string }
+): boolean {
+  if (session.mode !== "payment") return false;
+  const refOrderId = session.metadata?.orderId ?? session.client_reference_id ?? null;
+  if (refOrderId !== orderRow.id) return false;
+  const amountMatch = session.amount_total != null && session.amount_total === orderRow.amountCents;
+  const currencyMatch =
+    (session.currency ?? "").toLowerCase() === (orderRow.currency ?? "").toLowerCase();
+  return amountMatch && currencyMatch;
+}
+
 /**
  * Durable webhook: persist PaymentEvent first, then process, then ACK.
  * Never 2xx before event is in DB. P2002 => 200 (idempotent). Other DB errors => 500 (Stripe retries).
@@ -199,6 +213,143 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
           orderId: orderIdFromEvent,
         });
       }
+    } else if (event.type === "checkout.session.async_payment_succeeded") {
+      const session = event.data.object as Stripe.Checkout.Session;
+      const orderIdFromEvent = session.metadata?.orderId ?? session.client_reference_id ?? null;
+      const sessionId = session.id;
+      const payloadSnapshot: Record<string, unknown> = {
+        stripeEventId: event.id,
+        stripeSessionId: sessionId,
+        type: event.type,
+        amount_total: session.amount_total ?? undefined,
+        currency: session.currency ?? undefined,
+        payment_status: session.payment_status ?? undefined,
+      };
+      let orderId: string | null = orderIdFromEvent;
+      let orphaned = !orderIdFromEvent;
+      if (orderIdFromEvent) {
+        const orderRow = await prisma.order.findUnique({
+          where: { id: orderIdFromEvent },
+          select: { id: true, amountCents: true, currency: true },
+        });
+        if (!orderRow || !sessionOrderSanityCheck(session, orderRow)) {
+          orphaned = true;
+          if (orderIdFromEvent) {
+            logger.warn("checkout.session.async_payment_succeeded sanity check failed, order not marked paid", {
+              requestId,
+              stripeEventId,
+              stripeSessionId: sessionId,
+              orderId: orderIdFromEvent,
+            });
+          }
+        }
+      }
+      try {
+        await prisma.paymentEvent.create({
+          data: { stripeEventId, type: event.type, orderId, orphaned, payload: payloadSnapshot },
+        });
+      } catch (createErr: unknown) {
+        const code = createErr && typeof createErr === "object" && "code" in createErr ? (createErr as { code?: string }).code : undefined;
+        if (code === "P2002") {
+          const existing = await prisma.paymentEvent.findUnique({
+            where: { stripeEventId },
+            select: { orphaned: true },
+          });
+          if (orderIdFromEvent && sessionId && existing && !existing.orphaned) {
+            const paymentIntentId =
+              typeof session.payment_intent === "string"
+                ? session.payment_intent
+                : (session.payment_intent as Stripe.PaymentIntent)?.id ?? null;
+            await prisma.order.updateMany({
+              where: { id: orderIdFromEvent, status: { not: "paid" } },
+              data: {
+                stripeSessionId: sessionId,
+                ...(paymentIntentId && { stripePaymentIntentId: paymentIntentId }),
+                status: "paid",
+                paidAt: new Date(),
+              },
+            });
+          }
+          res.status(200).json({ received: true });
+          return;
+        }
+        if (config.NODE_ENV === "production") {
+          logger.error("Webhook persist failed", { requestId, stripeEventId, errorCode: "persist_failed" });
+        } else {
+          logger.error("Webhook persist failed", { requestId, stripeEventId, error: String(createErr) });
+        }
+        res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
+        return;
+      }
+      if (orderIdFromEvent && !orphaned) {
+        const paymentIntentId =
+          typeof session.payment_intent === "string"
+            ? session.payment_intent
+            : (session.payment_intent as Stripe.PaymentIntent)?.id ?? null;
+        await prisma.order.updateMany({
+          where: { id: orderIdFromEvent, status: { not: "paid" } },
+          data: {
+            stripeSessionId: sessionId,
+            ...(paymentIntentId && { stripePaymentIntentId: paymentIntentId }),
+            status: "paid",
+            paidAt: new Date(),
+          },
+        });
+      }
+      res.status(200).json({ received: true });
+    } else if (event.type === "checkout.session.async_payment_failed") {
+      const session = event.data.object as Stripe.Checkout.Session;
+      const orderIdFromEvent = session.metadata?.orderId ?? session.client_reference_id ?? null;
+      const sessionId = session.id;
+      const payloadSnapshot: Record<string, unknown> = {
+        stripeEventId: event.id,
+        stripeSessionId: sessionId,
+        type: event.type,
+      };
+      let orderId: string | null = orderIdFromEvent;
+      let orphaned = !orderIdFromEvent;
+      if (orderIdFromEvent) {
+        const orderRow = await prisma.order.findUnique({
+          where: { id: orderIdFromEvent },
+          select: { id: true },
+        });
+        if (orderRow) orphaned = false;
+      }
+      try {
+        await prisma.paymentEvent.create({
+          data: { stripeEventId, type: event.type, orderId, orphaned, payload: payloadSnapshot },
+        });
+      } catch (createErr: unknown) {
+        const code = createErr && typeof createErr === "object" && "code" in createErr ? (createErr as { code?: string }).code : undefined;
+        if (code === "P2002") {
+          const existing = await prisma.paymentEvent.findUnique({
+            where: { stripeEventId },
+            select: { orderId: true },
+          });
+          if (existing?.orderId) {
+            await prisma.order.updateMany({
+              where: { id: existing.orderId, status: "pending" },
+              data: { status: "failed" },
+            });
+          }
+          res.status(200).json({ received: true });
+          return;
+        }
+        if (config.NODE_ENV === "production") {
+          logger.error("Webhook persist failed", { requestId, stripeEventId, errorCode: "persist_failed" });
+        } else {
+          logger.error("Webhook persist failed", { requestId, stripeEventId, error: String(createErr) });
+        }
+        res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
+        return;
+      }
+      if (orderId && !orphaned) {
+        await prisma.order.updateMany({
+          where: { id: orderId, status: "pending" },
+          data: { status: "failed" },
+        });
+      }
+      res.status(200).json({ received: true });
     } else if (event.type === "charge.refunded") {
       const charge = event.data.object as Stripe.Charge;
       const paymentIntentId = typeof charge.payment_intent === "string" ? charge.payment_intent : charge.payment_intent?.id ?? null;
