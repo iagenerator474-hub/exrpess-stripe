@@ -137,6 +137,14 @@ export function validateProductionConfig(data: Config): void {
     throw new Error("Invalid environment configuration");
   }
   validateStripeWebhookSecretForProd(data.STRIPE_WEBHOOK_SECRET);
+  if (!data.STRIPE_SUCCESS_URL.startsWith("https://")) {
+    console.error("STRIPE_SUCCESS_URL must use https:// in production.");
+    throw new Error("Invalid environment configuration");
+  }
+  if (!data.STRIPE_CANCEL_URL.startsWith("https://")) {
+    console.error("STRIPE_CANCEL_URL must use https:// in production.");
+    throw new Error("Invalid environment configuration");
+  }
 }
 
 function loadConfig(): Config {

@@ -42,6 +42,10 @@ function sessionOrderSanityCheck(
 /**
  * Durable webhook: persist PaymentEvent first, then process, then ACK.
  * Never 2xx before event is in DB. P2002 => 200 (idempotent). Other DB errors => 500 (Stripe retries).
+ * Option A (order missing): when metadata.orderId is set but Order is not found, return 500 and do not
+ * persist PaymentEvent, so Stripe retries and we can process once the order exists (e.g. replication lag).
+ * Scenarios: (1) duplicate event => 200, no double apply (2) DB error => 500 => retry => correct state
+ * (3) event before Order exists => 500 => retry (4) success_url without payment => no effect (5) expired => status failed.
  */
 export async function handleStripeWebhook(req: Request, res: Response): Promise<void> {
   const rawBody = req.body as Buffer | undefined;
@@ -116,10 +120,18 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
           where: { id: orderIdFromEvent },
           select: { id: true, amountCents: true, currency: true },
         });
+        // Option A: orderId present but Order not found => 500 so Stripe retries; no ACK to avoid losing confirmation.
         if (!orderRow) {
-          orderId = null;
-          orphaned = true;
-        } else if (!sessionOrderSanityCheck(session, orderRow)) {
+          logger.warn("checkout.session.completed order not found, returning 500 for retry", {
+            requestId,
+            stripeEventId,
+            stripeSessionId: sessionId,
+            orderId: orderIdFromEvent,
+          });
+          res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
+          return;
+        }
+        if (!sessionOrderSanityCheck(session, orderRow)) {
           logger.warn("checkout.session.completed sanity check failed, order not marked paid", {
             requestId,
             stripeEventId,
@@ -228,16 +240,25 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
           where: { id: orderIdFromEvent },
           select: { id: true, amountCents: true, currency: true },
         });
-        if (!orderRow || !sessionOrderSanityCheck(session, orderRow)) {
+        // Option A: order not found => 500 for retry (no ACK).
+        if (!orderRow) {
+          logger.warn("checkout.session.async_payment_succeeded order not found, returning 500 for retry", {
+            requestId,
+            stripeEventId,
+            stripeSessionId: sessionId,
+            orderId: orderIdFromEvent,
+          });
+          res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
+          return;
+        }
+        if (!sessionOrderSanityCheck(session, orderRow)) {
           orphaned = true;
-          if (orderIdFromEvent) {
-            logger.warn("checkout.session.async_payment_succeeded sanity check failed, order not marked paid", {
-              requestId,
-              stripeEventId,
-              stripeSessionId: sessionId,
-              orderId: orderIdFromEvent,
-            });
-          }
+          logger.warn("checkout.session.async_payment_succeeded sanity check failed, order not marked paid", {
+            requestId,
+            stripeEventId,
+            stripeSessionId: sessionId,
+            orderId: orderIdFromEvent,
+          });
         }
       }
       try {
@@ -293,6 +314,7 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
         });
       }
       res.status(200).json({ received: true });
+      return;
     } else if (event.type === "checkout.session.async_payment_failed") {
       const session = event.data.object as Stripe.Checkout.Session;
       const orderIdFromEvent = session.metadata?.orderId ?? session.client_reference_id ?? null;
@@ -309,7 +331,18 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
           where: { id: orderIdFromEvent },
           select: { id: true },
         });
-        if (orderRow) orphaned = false;
+        // Option A: order not found => 500 for retry (no ACK).
+        if (!orderRow) {
+          logger.warn("checkout.session.async_payment_failed order not found, returning 500 for retry", {
+            requestId,
+            stripeEventId,
+            stripeSessionId: sessionId,
+            orderId: orderIdFromEvent,
+          });
+          res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
+          return;
+        }
+        orphaned = false;
       }
       try {
         await prisma.paymentEvent.create({
@@ -346,6 +379,107 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
         });
       }
       res.status(200).json({ received: true });
+      return;
+    } else if (event.type === "checkout.session.expired") {
+      const session = event.data.object as Stripe.Checkout.Session;
+      const orderIdFromEvent = (session.metadata?.orderId ?? session.client_reference_id) as string | null;
+      const sessionId = session.id;
+      const payloadSnapshot: Record<string, unknown> = {
+        stripeEventId: event.id,
+        stripeSessionId: sessionId,
+        type: event.type,
+      };
+      if (!orderIdFromEvent) {
+        try {
+          await prisma.paymentEvent.create({
+            data: {
+              stripeEventId,
+              type: event.type,
+              orderId: null,
+              orphaned: true,
+              payload: payloadSnapshot,
+            },
+          });
+        } catch (createErr: unknown) {
+          const code = createErr && typeof createErr === "object" && "code" in createErr ? (createErr as { code?: string }).code : undefined;
+          if (code === "P2002") {
+            res.status(200).json({ received: true });
+            return;
+          }
+          if (config.NODE_ENV === "production") {
+            logger.error("Webhook persist failed", { requestId, stripeEventId, errorCode: "persist_failed" });
+          } else {
+            logger.error("Webhook persist failed", { requestId, stripeEventId, error: String(createErr) });
+          }
+          res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
+          return;
+        }
+        res.status(200).json({ received: true });
+        return;
+      }
+      const orderRow = await prisma.order.findUnique({
+        where: { id: orderIdFromEvent },
+        select: { id: true, status: true },
+      });
+      // Option A: orderId present but Order not found => 500 for retry.
+      if (!orderRow) {
+        logger.warn("checkout.session.expired order not found, returning 500 for retry", {
+          requestId,
+          stripeEventId,
+          stripeSessionId: sessionId,
+          orderId: orderIdFromEvent,
+        });
+        res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
+        return;
+      }
+      try {
+        await prisma.paymentEvent.create({
+          data: {
+            stripeEventId,
+            type: event.type,
+            orderId: orderIdFromEvent,
+            orphaned: false,
+            payload: payloadSnapshot,
+          },
+        });
+      } catch (createErr: unknown) {
+        const code = createErr && typeof createErr === "object" && "code" in createErr ? (createErr as { code?: string }).code : undefined;
+        if (code === "P2002") {
+          const existing = await prisma.paymentEvent.findUnique({
+            where: { stripeEventId },
+            select: { orderId: true },
+          });
+          if (existing?.orderId) {
+            await prisma.order.updateMany({
+              where: { id: existing.orderId, status: "pending" },
+              data: { status: "failed" },
+            });
+          }
+          res.status(200).json({ received: true });
+          return;
+        }
+        if (config.NODE_ENV === "production") {
+          logger.error("Webhook persist failed", { requestId, stripeEventId, errorCode: "persist_failed" });
+        } else {
+          logger.error("Webhook persist failed", { requestId, stripeEventId, error: String(createErr) });
+        }
+        res.status(500).json({ error: "Internal server error", ...(requestId && { requestId }) });
+        return;
+      }
+      if (orderRow.status === "pending") {
+        await prisma.order.updateMany({
+          where: { id: orderIdFromEvent, status: "pending" },
+          data: { status: "failed" },
+        });
+        logger.info("checkout.session.expired order marked failed", {
+          requestId,
+          stripeEventId,
+          stripeSessionId: sessionId,
+          orderId: orderIdFromEvent,
+        });
+      }
+      res.status(200).json({ received: true });
+      return;
     } else if (event.type === "charge.refunded") {
       const charge = event.data.object as Stripe.Charge;
       const paymentIntentId = typeof charge.payment_intent === "string" ? charge.payment_intent : charge.payment_intent?.id ?? null;

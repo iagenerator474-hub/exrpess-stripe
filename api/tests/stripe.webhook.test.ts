@@ -285,7 +285,7 @@ describe("POST /stripe/webhook", () => {
     expect(prisma.order.updateMany).not.toHaveBeenCalled();
   });
 
-  it("stores event as orphaned when order not found", async () => {
+  it("returns 500 when order not found (Option A: no ACK, Stripe retries)", async () => {
     constructEventMock.mockReturnValueOnce({
       id: "evt_orphan",
       type: "checkout.session.completed",
@@ -299,15 +299,6 @@ describe("POST /stripe/webhook", () => {
       },
     });
     vi.mocked(prisma.order.findUnique).mockResolvedValue(null);
-    vi.mocked(prisma.paymentEvent.create).mockResolvedValueOnce({
-      id: "pe-orphan",
-      orderId: null,
-      orphaned: true,
-      stripeEventId: "evt_orphan",
-      type: "checkout.session.completed",
-      payload: null,
-      receivedAt: new Date(),
-    });
 
     const res = await request(app)
       .post("/stripe/webhook")
@@ -322,17 +313,8 @@ describe("POST /stripe/webhook", () => {
           })
         )
       );
-    expect(res.status).toBe(200);
-
-    expect(prisma.paymentEvent.create).toHaveBeenCalledWith({
-      data: {
-        stripeEventId: "evt_orphan",
-        type: "checkout.session.completed",
-        orderId: null,
-        orphaned: true,
-        payload: expect.any(Object),
-      },
-    });
+    expect(res.status).toBe(500);
+    expect(prisma.paymentEvent.create).not.toHaveBeenCalled();
     expect(prisma.order.updateMany).not.toHaveBeenCalled();
   });
 
@@ -585,6 +567,74 @@ describe("POST /stripe/webhook", () => {
       where: { id: "order-dup", status: { not: "paid" } },
       data: expect.objectContaining({ status: "paid" }),
     });
+  });
+
+  it("on checkout.session.expired with order pending updates Order to failed and returns 200", async () => {
+    constructEventMock.mockReturnValueOnce({
+      id: "evt_expired",
+      type: "checkout.session.expired",
+      data: {
+        object: {
+          id: "cs_expired",
+          metadata: { orderId: "order-exp" },
+          client_reference_id: "order-exp",
+        },
+      },
+    });
+    vi.mocked(prisma.order.findUnique).mockResolvedValue({ id: "order-exp", status: "pending" });
+    vi.mocked(prisma.paymentEvent.create).mockResolvedValueOnce({
+      id: "pe-expired",
+      orderId: "order-exp",
+      orphaned: false,
+      stripeEventId: "evt_expired",
+      type: "checkout.session.expired",
+      payload: null,
+      receivedAt: new Date(),
+    });
+    vi.mocked(prisma.order.updateMany).mockResolvedValueOnce({ count: 1 });
+
+    const res = await request(app)
+      .post("/stripe/webhook")
+      .set("Content-Type", "application/json")
+      .set("stripe-signature", "v1,expired")
+      .send(rawBody);
+    expect(res.status).toBe(200);
+    expect(prisma.paymentEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        stripeEventId: "evt_expired",
+        type: "checkout.session.expired",
+        orderId: "order-exp",
+        orphaned: false,
+      }),
+    });
+    expect(prisma.order.updateMany).toHaveBeenCalledWith({
+      where: { id: "order-exp", status: "pending" },
+      data: { status: "failed" },
+    });
+  });
+
+  it("on checkout.session.expired when order not found returns 500 for retry", async () => {
+    constructEventMock.mockReturnValueOnce({
+      id: "evt_exp_missing",
+      type: "checkout.session.expired",
+      data: {
+        object: {
+          id: "cs_exp_missing",
+          metadata: { orderId: "order-missing-exp" },
+          client_reference_id: "order-missing-exp",
+        },
+      },
+    });
+    vi.mocked(prisma.order.findUnique).mockResolvedValue(null);
+
+    const res = await request(app)
+      .post("/stripe/webhook")
+      .set("Content-Type", "application/json")
+      .set("stripe-signature", "v1,exp_missing")
+      .send(rawBody);
+    expect(res.status).toBe(500);
+    expect(prisma.paymentEvent.create).not.toHaveBeenCalled();
+    expect(prisma.order.updateMany).not.toHaveBeenCalled();
   });
 
   it("on charge.refunded full refund updates Order to refunded", async () => {
