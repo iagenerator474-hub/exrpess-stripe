@@ -60,8 +60,10 @@ const envSchema = z.object({
   RATE_LIMIT_AUTH_MAX: z.coerce.number().default(10),
   RATE_LIMIT_REFRESH_WINDOW_MS: z.coerce.number().default(15 * 60 * 1000),
   RATE_LIMIT_REFRESH_MAX: z.coerce.number().default(30),
+  /** Webhook rate limit: window (ms). Applied to POST /stripe/webhook. Default 60s. */
   RATE_LIMIT_WEBHOOK_WINDOW_MS: z.coerce.number().default(60 * 1000),
-  RATE_LIMIT_WEBHOOK_MAX: z.coerce.number().default(100),
+  /** Webhook rate limit: max requests per window. Prod: 1000/min recommended; override in .env for dev (e.g. 100). */
+  RATE_LIMIT_WEBHOOK_MAX: z.coerce.number().default(1000),
   RATE_LIMIT_CHECKOUT_WINDOW_MS: z.coerce.number().default(60 * 1000),
   RATE_LIMIT_CHECKOUT_MAX: z.coerce.number().default(30),
   ENABLE_DEMO: envBoolOptional,

@@ -80,6 +80,7 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// Webhook rate limit: applies to POST /stripe/webhook. Configure via RATE_LIMIT_WEBHOOK_MAX (default 1000/min) and RATE_LIMIT_WEBHOOK_WINDOW_MS (default 60000).
 const webhookLimiter = rateLimit({
   windowMs: config.RATE_LIMIT_WEBHOOK_WINDOW_MS,
   max: config.RATE_LIMIT_WEBHOOK_MAX,
